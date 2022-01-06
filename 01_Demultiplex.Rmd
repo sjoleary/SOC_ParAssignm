@@ -1,0 +1,711 @@
+---
+title: "Red drum broodstock offspring comparison"
+output:
+  html_notebook:
+    code_folding: hide
+    df_print: paged
+    highlight: kate
+    theme: flatly
+    toc: yes
+---
+
+```{r load libraries, message=FALSE, warning=FALSE}
+
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+
+# # Install `SimRAD` and dependencies of not yet installed on server
+# 
+# # Install BiocManager to install from Bioconductor
+# if (!requireNamespace("BiocManager", quietly = TRUE))
+#     install.packages("BiocManager")
+# 
+# # Biostrings
+# BiocManager::install("Biostrings")
+# 
+# # ShortRead
+# BiocManager::install("ShortRead")
+# 
+# # zlibbioc
+# BiocManager::install("zlibbioc")
+# 
+# # SimRAD
+# install.packages("SimRAD")
+
+library(SimRAD)
+
+# load libraries
+source("scr/libraries.R")
+
+# load functions
+source("scr/ggplot.R")
+source("scr/VCFfilterstats.R")
+source("scr/HaplotypR.R")
+source("scr/xtrafunctions.R")
+source("scr/genind.R")
+
+# other settings =====
+
+# set how numbers are printed
+options(scipen=999)
+
+```
+
+# Demultiplex sequences and Assess number of reads
+
+## Estimate expected number of fragments and reads per individuals
+
+### Estimate using probability of cut sites and fragment sizes
+
+```{r}
+
+# set enzyme parameters
+EcoRI <- c("G", "A", "A", "T", "T", "C")
+
+MspI <- c("C", "C", "G", "G")
+
+GC <- 40
+
+# set fragment parameters (tight window)
+frag_min <- 338
+
+frag_max <- 412
+
+# set genome parameters
+c <- 0.98 # from genomesize.com
+
+# set desired coverage
+cov_target <- 20
+
+# set desired number of individuals per library/sequencing lane
+nInd <- 240
+
+# account for PhiX spike to use up certain number of reads
+PhiX <- 10
+
+```
+
+Assuming a GC content of `r GC`, the probability of a base being a given nucleotide can be caculated as 1/2 of the %-GC content for a C or G (i.e. `r 0.5*GC/100`) and as 1/2 of the %-AT content (`r 0.5*(100-GC)/100`). Based on the number and type of bases in the cut site recogniztion the cut frequency can be calculated as $2^{n(GC)}*2^{n(AT)}$. 
+
+```{r}
+
+# calculate cut frequency for G and C
+cutGC <- 0.5*(GC/100)
+
+# calcuate cut frequency for A and T
+cutAT <- 0.5*((100-GC)/100)
+
+# cut frequency enzyme 1 (EcoRI) ----
+
+# number of G/C in cut site
+nGC <- as.numeric(sum(EcoRI == "G") + sum(EcoRI == "C"))
+
+# number of A/T in cut site
+nAT <- as.numeric(sum(EcoRI == "A") + sum(EcoRI == "T"))
+
+frq1 <- cutGC^nGC*cutAT^nAT
+
+
+# cut frequency enzyme 2 (MspI) ----
+
+# number of G/C in cut site
+nGC <- as.numeric(sum(MspI == "G") + sum(MspI == "C"))
+
+# number of A/T in cut site
+nAT <- as.numeric(sum(MspI == "A") + sum(MspI == "T"))
+
+frq2 <- cutGC^nGC*cutAT^nAT
+
+# frequency both enzyme cuts given the width of the selection window ----
+frq3 <- frq1*frq2*(frag_max-frag_min)
+
+```
+
+The reciprocal indicate every how many base pairs the enzyme can be expected to cut, i.e. on average EcoRI will cut every `r 1/frq1` and MspI every `r 1/frq2` bases. The frequency of getting fragments with both cut sites is the product of the two frequencies, which needs to be multiplied with the width of the selection window (wider window should select more fragments), i.e. for a ddRAD protocol using EcoRI and MsPI and we should get a fragment in the selection window of 338 - 412bp (`r frag_max-frag_min` bp wide) of `r 1/(frq1*frq2*(frag_max-frag_min))` bp.
+
+The expected genome size can be calculated based on a c-value for a genome, e.g. for red drum (c-value = 0.98) the genome is expected to be `r c*978` Mbp.
+
+```{r}
+
+# genome size
+genome <- c*978
+
+# expected number of cuts
+cuts <- genome*1000000/(1/frq3)
+
+# expected loci (if using only 1 enzyme would expect 2 loci per cut)
+RADloc <- cuts*1
+
+```
+
+Leading to an expected number of `r RADloc` RAD loci per individual. For a targeted coverage of 20 reads per locus, a total of `r RADloc*cov_target/1000000` Million reads are needed per individual.
+
+```{r}
+
+perInd <- RADloc*cov_target
+
+```
+
+Currently, one Illumina HiSeq 4000 lane produces approx. 300 Million reads, `r PhiX`% reads are budgeted for PhiX spike in to diversify nucleotides for better results.
+
+```{r}
+
+tot_reads <- 300000000
+
+PhiX_reads <- 300000000*.1
+
+reads_per_ind <- (tot_reads-PhiX_reads)/nInd
+
+```
+
+The for `r nInd` individuals being sequencin on a lane as a pooled library the expected number of reads per individuals is `r reads_per_ind/1000000` Million.
+
+
+### Estimate expected number of fragments using in silico digestions of genome
+
+`SimRAD` will perform in silico digestions & size selection for simulated and sequenced reference genomes to estimate the expected number of fragments per individual.
+
+#### Simulated genome for digestion & fragment selection
+
+Simulate genome for an estimated size of `r c*978`Mbp and `GC`% GC-content and digest using EcoRI and MsPI for a window of `r frag_min` and `r frag_max`.
+
+```{r message=FALSE, warning=FALSE}
+
+# simulate genome
+DNAseq <- sim.DNAseq(size = genome*1000000, GC = 0.4)
+
+# define cut sites
+EcoR1_5p1 <- "G"     # 5' side of cut site
+EcoR1_3p1 <- "AATTC" # 3' side of cut site  
+
+MspI_5p2 <- "C"      # 5' side of cut site
+MspI_3p2 <-"CGG"     # 3' side of cut site
+
+# digest simulated genome
+Sim <- insilico.digest(DNAseq, EcoR1_5p1, EcoR1_3p1, MspI_5p2, MspI_3p2, verbose = TRUE) 
+
+```
+
+Select fragments with both cut sites, and determine number of fragments between `r frag_min` and `r frag_max`.
+
+```{r message=FALSE, warning=FALSE}
+
+# select fragments w/both cut sites
+AS <- adapt.select(Sim, type="AB+BA", EcoR1_5p1, EcoR1_3p1, MspI_5p2, MspI_3p2) 
+
+# size select
+size_select <-size.select(AS, min.size = frag_min, max.size = frag_max, graph = TRUE, verbose = FALSE)
+
+```
+
+#### Use reference genome for red drum
+
+Import sequenced red drum genome and digest using EcoRI and MsPI.
+
+```{r message=FALSE, warning=FALSE}
+
+# simulate genome
+DNAseq <- ref.DNAseq("data/REF/soc_v1.fasta", subselect.contigs = FALSE)
+
+# digest simulated genome
+Sim <- insilico.digest(DNAseq, EcoR1_5p1, EcoR1_3p1, MspI_5p2, MspI_3p2, verbose = TRUE) 
+
+```
+
+Select fragments with both cut sites and select fragments between `r frag_min` and `r frag_max`bp length.
+
+```{r message=FALSE, warning=FALSE}
+
+# select fragments w/both cut sites
+AS <-adapt.select(Sim, type="AB+BA", EcoR1_5p1, EcoR1_3p1, MspI_5p2, MspI_3p2) 
+
+# size select
+size_select <-size.select(AS, min.size = frag_min, max.size = frag_max, graph = TRUE, verbose = FALSE)
+
+```
+
+Currently, one Illumina HiSeq 4000 lane produces approx. 300 Million reads, `r PhiX`% reads are budgeted for PhiX spike in to diversify nucleotides for better results.
+
+```{r}
+
+tot_reads <- 300000000
+
+PhiX_reads <- 300000000*.1
+
+reads_per_ind <- (tot_reads-PhiX_reads)/nInd
+
+```
+
+Resulting in `r reads_per_ind` reads per individual (240 individuals in a lane), over 7,975 loci this would mean a `r reads_per_ind/7975` coverage.
+
+## Demultiplex samples
+
+### Demultiplex Soc1
+
+Make sure index is in the file name of the downloaded sequences before demultiplexing; input file barcode then index; `demultiplex.txt` is in UNIX format.
+
+```{bash demultiplex Soc1, eval=FALSE, include=FALSE}
+
+# create demultiplexed sequence folder
+mkdir /home/soleary/DRUM/data/SEQ/Soc1
+cd /home/soleary/DRUM/data/SEQ/Soc1
+
+# demultiplex files
+demultiplex.pl -i Demultiplex_Soc1.txt -o Extract_Soc1.sh -p /home/soleary/DRUM/data/SEQ/Soc1 -d /home/DATA/DRUM/Soc1
+
+# make sure to edit Extract script to only contain one cut site
+chmod 755 Extract_Soc1.sh
+./Extract_Soc1.sh
+
+# delete unnecessary files generated during demultiplexing
+rm sample*
+rm dumper.out
+
+# move log files to SEQ folder
+cp CAGATC_radtags.log /home/soleary/DRUM/data/SEQ/Soc1_CAGATC_radtags.log
+cp CGATGT_radtags.log /home/soleary/DRUM/data/SEQ/Soc1_CGATGT_radtags.log
+cp GGCTAC_radtags.log /home/soleary/DRUM/data/SEQ/Soc1_GGCTAC_radtags.log
+cp TAGCTT_radtags.log /home/soleary/DRUM/data/SEQ/Soc1_TAGCTT_radtags.log
+cp TGACCA_radtags.log /home/soleary/DRUM/data/SEQ/Soc1_TGACCA_radtags.log
+
+cp Demultiplex_Soc1.txt /home/soleary/DRUM/data/SEQ/
+
+```
+
+
+### Demultiplex Soc2
+
+Make sure index is in the file name of the downloaded sequences before demultiplexing; input file barcode then index; `demultiplex.txt` is in UNIX format.
+
+```{bash demultiplex Soc2, eval=FALSE, include=FALSE}
+
+# create demultiplexed sequence folder
+# mkdir /home/soleary/DRUM/data/SEQ/Soc2
+cd /home/soleary/DRUM/data/SEQ/Soc2
+
+# demultiplex files
+demultiplex.pl -i Demultiplex_Soc2.txt -o Extract_Soc2.sh -p /home/soleary/DRUM/data/SEQ/Soc2 -d /home/DATA/DRUM/Soc2
+
+# make sure to edit Extract script to only contain one cut site
+chmod 755 Extract_Soc2.sh
+./Extract_Soc2.sh
+
+# delete unnecessary files generated during demultiplexing
+rm sample*
+rm dumper.out
+
+# move log files to SEQ folder
+cp CAGATC_radtags.log /home/soleary/DRUM/data/SEQ/Soc2_CAGATC_radtags.log
+cp CGATGT_radtags.log /home/soleary/DRUM/data/SEQ/Soc2_CGATGT_radtags.log
+cp GGCTAC_radtags.log /home/soleary/DRUM/data/SEQ/Soc2_GGCTAC_radtags.log
+cp TAGCTT_radtags.log /home/soleary/DRUM/data/SEQ/Soc2_TAGCTT_radtags.log
+cp TGACCA_radtags.log /home/soleary/DRUM/data/SEQ/Soc2_TGACCA_radtags.log
+
+cp Demultiplex_Soc2.txt /home/soleary/DRUM/data/SEQ/
+
+```
+
+
+### Demultiplex Soc3
+
+Make sure index is in the file name of the downloaded sequences before demultiplexing; input file barcode then index; `demultiplex.txt` is in UNIX format.
+
+```{bash demultiplex Soc3, eval=FALSE, include=FALSE}
+
+# create demultiplexed sequence folder
+# mkdir /home/soleary/DRUM/data/SEQ/Soc2
+cd /home/soleary/DRUM/data/SEQ/Soc3
+
+# demultiplex files
+demultiplex.pl -i Demultiplex_Soc3.txt -o Extract_Soc3.sh -p /home/soleary/DRUM/data/SEQ/Soc3 -d /home/DATA/DRUM/Soc3
+
+# make sure to edit Extract script to only contain one cut site
+chmod 755 Extract_Soc3.sh
+./Extract_Soc3.sh
+
+# delete unnecessary files generated during demultiplexing
+rm sample*
+rm dumper.out
+
+# move log files to SEQ folder
+cp CAGATC_radtags.log /home/soleary/DRUM/data/SEQ/Soc3_CAGATC_radtags.log
+cp CGATGT_radtags.log /home/soleary/DRUM/data/SEQ/Soc3_CGATGT_radtags.log
+cp GGCTAC_radtags.log /home/soleary/DRUM/data/SEQ/Soc3_GGCTAC_radtags.log
+cp TAGCTT_radtags.log /home/soleary/DRUM/data/SEQ/Soc3_TAGCTT_radtags.log
+cp TGACCA_radtags.log /home/soleary/DRUM/data/SEQ/Soc3_TGACCA_radtags.log
+
+cp Demultiplex_Soc3.txt /home/soleary/DRUM/data/SEQ/
+
+```
+
+
+### Demultiplex Soc4
+
+Make sure index is in the file name of the downloaded sequences before demultiplexing; input file barcode then index; `demultiplex.txt` is in UNIX format.
+
+```{bash demultiplex Soc4, eval=FALSE, include=FALSE}
+
+# create demultiplexed sequence folder
+# mkdir /home/soleary/DRUM/data/SEQ/Soc2
+cd /home/soleary/DRUM/data/SEQ/Soc4
+
+# demultiplex files
+demultiplex.pl -i Demultiplex_Soc4.txt -o Extract_Soc4.sh -p /home/soleary/DRUM/data/SEQ/Soc4 -d /home/DATA/DRUM/Soc4
+
+# make sure to edit Extract script to only contain one cut site
+chmod 755 Extract_Soc4.sh
+./Extract_Soc4.sh
+
+# delete unnecessary files generated during demultiplexing
+rm sample*
+rm dumper.out
+
+# move log files to SEQ folder
+cp CAGATC_radtags.log /home/soleary/DRUM/data/SEQ/Soc4_CAGATC_radtags.log
+cp CGATGT_radtags.log /home/soleary/DRUM/data/SEQ/Soc4_CGATGT_radtags.log
+cp GGCTAC_radtags.log /home/soleary/DRUM/data/SEQ/Soc4_GGCTAC_radtags.log
+cp TAGCTT_radtags.log /home/soleary/DRUM/data/SEQ/Soc4_TAGCTT_radtags.log
+cp TGACCA_radtags.log /home/soleary/DRUM/data/SEQ/Soc4_TGACCA_radtags.log
+
+cp Demultiplex_Soc4.txt /home/soleary/DRUM/data/SEQ/
+
+```
+
+
+### Demultiplex Soc5
+
+Make sure index is in the file name of the downloaded sequences before demultiplexing; input file barcode then index; `demultiplex.txt` is in UNIX format.
+
+```{bash demultiplex Soc5, eval=FALSE, include=FALSE}
+
+# create demultiplexed sequence folder
+# mkdir /home/soleary/DRUM/data/SEQ/Soc2
+cd /home/soleary/DRUM/data/SEQ/Soc5
+
+# demultiplex files
+demultiplex.pl -i Demultiplex_Soc5.txt -o Extract_Soc5.sh -p /home/soleary/DRUM/data/SEQ/Soc5 -d /home/DATA/DRUM/Soc5
+
+# make sure to edit Extract script to only contain one cut site
+chmod 755 Extract_Soc5.sh
+./Extract_Soc5.sh
+
+# delete unnecessary files generated during demultiplexing
+rm sample*
+rm dumper.out
+
+# move log files to SEQ folder
+cp CAGATC_radtags.log /home/soleary/DRUM/data/SEQ/Soc5_CAGATC_radtags.log
+cp CGATGT_radtags.log /home/soleary/DRUM/data/SEQ/Soc5_CGATGT_radtags.log
+cp GGCTAC_radtags.log /home/soleary/DRUM/data/SEQ/Soc5_GGCTAC_radtags.log
+cp TAGCTT_radtags.log /home/soleary/DRUM/data/SEQ/Soc5_TAGCTT_radtags.log
+cp TGACCA_radtags.log /home/soleary/DRUM/data/SEQ/Soc5_TGACCA_radtags.log
+
+cp Demultiplex_Soc5.txt /home/soleary/DRUM/data/SEQ/
+
+```
+
+
+### Demultiplex SocX1
+
+Make sure index is in the file name of the downloaded sequences before demultiplexing; input file barcode then index; `demultiplex.txt` is in UNIX format.
+
+```{bash demultiplex SocX1, eval=FALSE, include=FALSE}
+
+# create demultiplexed sequence folder
+# mkdir /home/soleary/DRUM/data/SEQ/Soc2
+cd /home/soleary/DRUM/data/SEQ/SocX1
+
+# demultiplex files
+demultiplex.pl -i Demultiplex_SocX1.txt -o Extract_SocX1.sh -p /home/soleary/DRUM/data/SEQ/SocX1 -d /home/DATA/DRUM/SocX1
+
+# make sure to edit Extract script to only contain one cut site
+chmod 755 Extract_SocX1.sh
+./Extract_SocX1.sh
+
+# delete unnecessary files generated during demultiplexing
+rm sample*
+rm dumper.out
+
+# move log files to SEQ folder
+cp CAGATC_radtags.log /home/soleary/DRUM/data/SEQ/SocX1_CAGATC_radtags.log
+cp CGATGT_radtags.log /home/soleary/DRUM/data/SEQ/SocX1_CGATGT_radtags.log
+cp GGCTAC_radtags.log /home/soleary/DRUM/data/SEQ/SocX1_GGCTAC_radtags.log
+cp TAGCTT_radtags.log /home/soleary/DRUM/data/SEQ/SocX1_TAGCTT_radtags.log
+cp TGACCA_radtags.log /home/soleary/DRUM/data/SEQ/SocX1_TGACCA_radtags.log
+
+cp Demultiplex_SocX1.txt /home/soleary/DRUM/data/SEQ/
+
+```
+
+
+### Demultiplex SocX2
+
+Make sure index is in the file name of the downloaded sequences before demultiplexing; input file barcode then index; `demultiplex.txt` is in UNIX format.
+
+```{bash demultiplex SocX2, eval=FALSE, include=FALSE}
+
+# create demultiplexed sequence folder
+# mkdir /home/soleary/DRUM/data/SEQ/Soc2
+cd /home/soleary/DRUM/data/SEQ/SocX2
+
+# demultiplex files
+demultiplex.pl -i Demultiplex_SocX2.txt -o Extract_SocX2.sh -p /home/soleary/DRUM/data/SEQ/SocX2 -d /home/DATA/DRUM/SocX2
+
+# make sure to edit Extract script to only contain one cut site
+chmod 755 Extract_SocX2.sh
+./Extract_SocX2.sh
+
+# delete unnecessary files generated during demultiplexing
+rm sample*
+rm dumper.out
+
+# move log files to SEQ folder
+cp CAGATC_radtags.log /home/soleary/DRUM/data/SEQ/SocX2_CAGATC_radtags.log
+cp CGATGT_radtags.log /home/soleary/DRUM/data/SEQ/SocX2_CGATGT_radtags.log
+cp GGCTAC_radtags.log /home/soleary/DRUM/data/SEQ/SocX2_GGCTAC_radtags.log
+cp TAGCTT_radtags.log /home/soleary/DRUM/data/SEQ/SocX2_TAGCTT_radtags.log
+cp TGACCA_radtags.log /home/soleary/DRUM/data/SEQ/SocX2_TGACCA_radtags.log
+
+cp Demultiplex_SocX2.txt /home/soleary/DRUM/data/SEQ/
+
+```
+
+
+## Quality control demultiplexed reads
+
+### Assess number of reads per individuals
+
+Parse process radtags log file.
+
+```{r parse process radtags, message=FALSE, warning=FALSE}
+
+# IMPORT BARCODE & INDEX FOR EACH SAMPLE USING DEMULTIPLEX FILES ----
+
+# all demultiplex files named Demultiplex_SP-COD-LibNo.txt
+
+# list all demultiplex files
+d <- list.files(path = "data/SEQ", pattern = "Demultiplex*")
+
+# directory with demultiplex files
+dir <- "data/SEQ"
+
+# create empty list
+barcodes <- list()
+  
+# import all demultiplex files
+for (i in 1:length(d)){
+  
+  lib <- d[[i]] %>%
+    str_sub(13, -5) %>%
+    sub(pattern = "-", replacement = "")
+  
+  f <- file.path(dir, d[[i]]) 
+  
+  barcodes[[i]] <- read_delim(f, delim = "\t", col_names = c("SAMPLE", "BARCODE", "INDEX")) %>%
+    mutate(LIBRARY = lib)
+}
+
+# create single data frame
+barcodes <- ldply(barcodes, data.frame)
+
+# IMPORT READS PER SAMPLE USING PROCESS RADTAGS LOG FILES ----
+
+# all logs named LIBCODE_INDEX_radtags.log
+
+# directory with radtag logs
+dir <- "data/SEQ"
+
+# list all radtag logs
+logs <- list.files(path = "data/SEQ", pattern = "*radtags.log")
+
+# create empty list
+l <- list()
+
+# number of samples in each index
+n_samples <- 48
+
+# read in your logs
+for (i in 1:length(logs)){
+  
+  f <- file.path(dir, logs[[i]]) 
+  
+  name <- logs[[i]] %>%
+    str_split_fixed(pattern = "_", n = 3)
+  
+  index <- name[[2]]
+  lib <- name[[1]]
+  
+  demultiplex <- barcodes %>%
+    filter(LIBRARY == lib) %>%
+    select(-LIBRARY)
+  
+  l[[i]] <- read_table2(f,
+                        skip = 13, n_max = n_samples,
+                        col_names = c("BARCODE", "TOTAL_READS", "AMBIG_READS", "LQ_READS", "RETAINED")) %>%
+        mutate(PROP_RETAINED = RETAINED/TOTAL_READS,
+               INDEX = index,
+               LIBRARY = lib) %>%
+        select(LIBRARY, INDEX, BARCODE, PROP_RETAINED, TOTAL_READS, RETAINED, AMBIG_READS, LQ_READS) %>%
+        left_join(demultiplex)
+  
+}
+
+# create single data frame
+radtagslog <- ldply(l, data.frame) %>%
+  select(-LQ_READS) %>%
+  unite(LIB_IDX, LIBRARY, INDEX, sep = "_", remove = FALSE)
+
+write_delim(radtagslog, "results/all.radtags.log")
+
+```
+
+Compare demultiplexed reads per library & index.
+
+Plot distributions of total and proportion of retained reads.
+
+```{r plot reads, fig.height=33, fig.width=5, message=TRUE, warning=TRUE}
+
+radtagslog %>%
+  filter(!str_detect(SAMPLE, 'BLANK')) %>%
+  mutate(MILL_RETAINED = RETAINED/1000000) %>%
+  select(LIB_IDX, LIBRARY, INDEX, BARCODE, PROP_RETAINED, MILL_RETAINED) %>%
+  gather(key = STAT, value = READS, 5:6) %>%
+  ggplot(aes(x = READS)) +
+  geom_histogram(color = "black", fill = "darkorange") +
+  labs(x = "reads") +
+  facet_grid(LIB_IDX ~ STAT, scales = "free") +
+  theme_standard
+
+```
+
+Assess relationship between proportion and number of reads retained.
+
+```{r}
+
+radtagslog %>%
+  mutate(BLANK = ifelse(str_detect(SAMPLE, 'BLANK'), "BLANK", "SAMPLE"),
+         MILL_RETAINED = RETAINED/1000000) %>%
+  ggplot() +
+  geom_point(aes(x = MILL_RETAINED, y = PROP_RETAINED, fill = BLANK),
+             shape = 21, color = "black", alpha = 0.5, size = 2) +
+  scale_fill_viridis_d() +
+  labs(x = "million retained reads", y = "proportion retained") +
+  theme_standard
+
+```
+
+Compare number of reads per sample
+
+```{r fig.height=6, fig.width=12}
+
+# remove blanks from samples before plotting
+radtagslog %>%
+  filter(!str_detect(SAMPLE, 'BLANK')) %>%
+  mutate(MILL_RETAINED = RETAINED/1000000) %>%
+  ggplot() +
+  geom_boxplot(aes(y = MILL_RETAINED, x = LIB_IDX), color = "black", fill = "darkorange", size = 1) +
+  geom_hline(yintercept = 1.1, color = "darkred", linetype = "dashed") +
+  labs(x = "million retained reads", y = "") +
+  theme_standard +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+```
+
+HiSeq4000 yeilds approx. 280-330 million reads per lane (including 1% PhiX spike). Rough calculation of genome with c-value 0.98 should yield  36,767 fragments in the selected size window per sample for two cut-sites (EcoRI, MspI). Each individual should be getting approx. 1.1 Million reads.
+
+Count number of samples with > 1,000,000 reads:
+
+```{r}
+
+radtagslog %>%
+  filter(!str_detect(SAMPLE, 'BLANK')) %>%
+  group_by(LIB_IDX) %>%
+  count(RETAINED > 1000000) %>%
+  spread(key = `RETAINED > 1000000`, value = n)
+
+```
+
+```{r}
+
+radtagslog %>%
+  filter(!str_detect(SAMPLE, 'BLANK')) %>%
+  count(RETAINED > 1000000)
+
+```
+
+Quantiles of retained reads per sample (without blanks)
+
+```{r}
+
+temp <- radtagslog %>%
+  filter(!str_detect(SAMPLE, 'BLANK'))
+
+quantile(temp$RETAINED, probs = c(0.001, 0.01, 0.05, 0.10, 0.33, 0.5))
+
+```
+
+## Quality trim
+
+### Remove low quality individuals
+
+To cut down on computational power blanks and individuals with very low number of reads can be removed.
+
+Identify low quality individuals.
+
+```{r}
+
+lq_ind <- radtagslog %>%
+  filter(!str_detect(SAMPLE, 'BLANK')) %>%
+  filter(RETAINED < 50000 & PROP_RETAINED < 0.7)
+
+blanks <- radtagslog %>%
+  filter(str_detect(SAMPLE, 'BLANK'))
+
+rm_ind <- bind_rows(lq_ind, blanks)
+
+```
+
+Write bash script to delete `fastq` files of low quality individuals from Soc-1.
+
+```{r}
+
+command <- "rm"
+
+SEQ <- rm_ind %>%
+  select(SAMPLE) %>%
+  mutate(temp = "*") %>%
+  unite(SEQ, SAMPLE, temp, sep = "") %>%
+  mutate(COMMAND = command) %>%
+  select(COMMAND, SEQ)
+
+write.table(SEQ, "scr/rm_LQind.sh", 
+            col.names = FALSE, quote = FALSE, row.names = FALSE)
+
+```
+
+Remove files
+
+```{bash}
+
+# make executable
+chmod 755 /home/soleary/DRUM/scr/rm_LQind.sh
+
+# go to sequences parent directory
+cd /home/soleary/DRUM/data/SEQ/
+
+# loop over all reference creation folders
+for d in Soc*
+
+do
+    (cd "$d" && sh /home/soleary/DRUM/scr/rm_LQind.sh)
+    
+done
+
+```
+
+
+### Quality trim data
+
+`dDocent` uses Trimmomatic to quality trim the data - this only needs to occur once. Low quality bases (< 20) are trimmed from beginning/end of reads. Additionally, bases are trimmed when average quality drops below 5 in a sliding window (5bp). The quality trimmed files are needed for further steps in `dDocent` (`*.R1.fq` and `*.R2.fq`)
+
+Run `dDocent` in each sequence folder to quality trim reads.
+

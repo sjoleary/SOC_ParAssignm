@@ -1,0 +1,1439 @@
+---
+title: "Spawning and Reproductive Success of Hatchery Breeders"
+subtitle: "Comparison of reproductive success in red drum hatchery adults"
+author: "SJ O'Leary"
+date: "`r Sys.Date()`"
+output: tint::tintHtml
+bibliography: SOC.bib
+link-citations: yes
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+
+
+# load libraries and functions ====
+
+# load libraries
+library(tint)
+library(knitr)
+library(glue)
+library(ggrepel)
+source("scr/libraries.R")
+
+# load functions
+source("scr/ggplot.R")
+source("scr/VCFfilterstats.R")
+source("scr/HaplotypR.R")
+source("scr/xtrafunctions.R")
+source("scr/genind.R")
+
+# OTHER OPTIONS ====
+
+# set how numbers are printed
+options(scipen=999)
+
+# invalidate cache when the package version changes
+knitr::opts_chunk$set(
+	message = FALSE,
+	warning = FALSE,
+	cache.extra = packageVersion("tint"),
+	tidy = FALSE,
+	echo = FALSE
+)
+
+options(htmltools.dir.version = FALSE)
+
+# load pedigree
+pedigree <- read_delim("results/YOY.pedigree", delim = "\t")
+
+# load adult information
+adults <- read_delim("data/ASSIGNMENT/Adult_info.txt", delim = "\t")
+
+
+col_events <- c("#4473c4", "#3d6623", "#c00000")
+
+col_tanks <- c("darkorange", "#72b844", "gold", "#7008A0")
+  
+col_nine <- c("#44546a", "#7008a0", "#ed7d31", 
+              "#ffbf00", "#4473c4", "#70ad47", 
+              "#c00000",  "#375623", "#5b9bd5")  
+
+```
+
+
+# Effective number of breeders
+
+Unequal sex ratios and variance in family sizes among mating combinations (sire X dam) can contribute to the effective number of breeders $N_{b}$ being reduced compared to the potential number of breeders $N$ contributing to a given spawning event (i.e. brood fish present in spawning tanks).
+
+The maximum effective number of breeders if all pairs (male x female combinations) contribute equally can be calculated as
+
+`r margin_note("(Equation. 1)")`
+
+$$N_{b(max)} =\frac{4(N_{f}N_{m})}{N_{f} + N_{m}}$$
+
+with $N_{f}$ and $N_{m}$ denoting the number of females and males potentially contributing to the spawning event, respectively [@Crow1971].
+
+Generally, some individuals in a spawning tank will not contribute at all; to determine the reduction in $N_{b}$ due to some individuals not contributing at all the above equation can be used using the number of male and female broodstock that had progeny assigned to them for $N_{f}$ and $N_{m}$.
+
+The effect of variance in family size in reducing the effective number of breeders can be calculated as:
+
+`r margin_note("(Equation. 2)")`
+
+$$N_{b} =\frac{4(N_{bf}N_{bm})}{N_{bf} + N_{bm}}$$
+
+With the effective number of females ($N_{bf}$) calculated as 
+
+`r margin_note("(Equation. 3.1)")`
+
+$$N_{bf}=\frac{1}{\sum_{k=1}^{n_{f}}q_{k}^2}$$
+
+and the effective number of males ($N_{bf}$) calculated as 
+
+`r margin_note("(Equation. 3.2)")`
+
+$$N_{bf}=\frac{1}{\sum_{k=1}^{n_{f}}q_{k}^2}$$
+
+with $N_{f}$ and $N_{m}$ as the actual number of females and and males contributing to a spawning event, and $q$ as the proportion of progeny contributed by an adult [@Lacy1989].
+
+Calculate values of maximum attainable $N_{b}$ given the number of individuals in tanks contributing to a spawning event, and given the actual number of individuals that did have progeny assigned to them. Determine the effective number of breeders based on variance in family size and calculate the reduction in $N_{b}$ at each sampling point compared to $N_{b(max)}$ and the reduction due to the fact that some brood fish do not contribute at all.
+
+```{r}
+
+# calculate the effective number of males
+Nbm <- setNames(data.frame(matrix(ncol = 3, nrow = 0)), c("SAMPLE_POINT", "Nbm", "SPAWNING_EVENT"))
+
+for(i in c("YOY-1", "YOY-2","YOY-3")){
+  
+  tmp <- pedigree %>%
+    filter(GRP == i) %>%
+    count(SAMPLE_POINT, sire) %>%
+    group_by(SAMPLE_POINT) %>%
+    mutate(freq = round(n/sum(n), digits = 3)) %>%
+    select(-n) %>%
+    summarize(Nbm = 1/(sum(freq^2)),
+              Nm = n()) %>%
+    mutate(SPAWNING_EVENT = i)
+  
+  
+  Nbm <- bind_rows(Nbm, tmp)
+  
+}
+
+
+# calculate the effective number of females
+Nbf <- setNames(data.frame(matrix(ncol = 3, nrow = 0)), c("SAMPLE_POINT", "Nbf", "SPAWNING_EVENT"))
+
+for(i in c("YOY-1", "YOY-2","YOY-3")){
+  
+  tmp <- pedigree %>%
+    filter(GRP == i) %>%
+    count(SAMPLE_POINT, dam) %>%
+    group_by(SAMPLE_POINT) %>%
+    mutate(freq = round(n/sum(n), digits = 3)) %>%
+    select(-n) %>%
+    summarize(Nbf = 1/(sum(freq^2)),
+              Nf = n()) %>%
+    mutate(SPAWNING_EVENT = i)
+  
+  
+  Nbf <- bind_rows(Nbf, tmp)
+  
+}
+
+
+# calculate effective number of breeders
+Nb <- left_join(Nbm, Nbf) %>%
+  select(SPAWNING_EVENT, SAMPLE_POINT, Nm, Nbm, Nf, Nbf) %>%
+  
+  # calculate maximum attainable Nb if all individuals in tanks spawn & are equally successful
+  mutate(N_tanks = case_when(SPAWNING_EVENT == "YOY-1" ~ 10,
+                       SPAWNING_EVENT == "YOY-2" ~ 20,
+                       SPAWNING_EVENT == "YOY-3" ~ 15),
+         F_tanks = case_when(SPAWNING_EVENT == "YOY-1" ~ 5,
+                            SPAWNING_EVENT == "YOY-2" ~ 11,
+                            SPAWNING_EVENT == "YOY-3" ~ 9),
+         M_tanks = case_when(SPAWNING_EVENT == "YOY-1" ~ 5,
+                            SPAWNING_EVENT == "YOY-2" ~ 9,
+                            SPAWNING_EVENT == "YOY-3" ~ 6),
+         `Nb(max)` = (4*F_tanks*M_tanks)/(F_tanks+M_tanks)) %>%
+  
+  # calculate maximum attainable Nb based on number of individuals actually contributing
+  mutate(N_contrib = Nm + Nf,
+         `Nb(max)'` = (4*Nf*Nm)/(Nf+Nm)) %>%
+  
+  # calculate Nb based on variance in family size
+  mutate(`Nb` = (4*Nbf*Nbm)/(Nbf+Nbm)) %>%
+  
+  # calculated reduction in Nb due to indivinduals not contributing at all and unequal contribution
+  mutate(Reduct_unsuccessf = 1-(`Nb(max)'`/`Nb(max)`),
+         Reduct_variance = 1-(`Nb`/`Nb(max)`))
+
+kable(
+  Nb %>%
+  rename(`E` = SPAWNING_EVENT,
+         `P` = SAMPLE_POINT) %>%
+  mutate(Nbm = round(Nbm, digits = 2),
+         Nbf = round(Nbf, digits = 2),
+         `Nb(max)` = round(`Nb(max)`, digits = 2),
+         `Nb(max)'` = round(`Nb(max)'`, digits = 2),
+         `Nb` = round(`Nb`, digits = 2),
+         Reduct_unsuccessf = round(Reduct_unsuccessf, digits = 2),
+         Reduct_variance = round(Reduct_variance, digits = 2)),
+  align="l", 
+  caption = "Table 1: Comparison of actual and effective number of breeders per spawning event and sample point. Nm and Nf denote the actual number of males and females with progeny assigned to them for a given spawning event/sampling point, N_contrib is the total number of contributing broodfish, Nb(max) is the maximum effective number of breeders if all fish in tanks are successful and contribute equally (Equation 1), Nb(max)' is the maximum number of effective breeders given the number of males/females that actually had progeny assigned to them, while Nb is the effective number of breeders accounting for variance in family size. Reduct_unsuccessf indicates the reductions in effective number of breeders compared to Nb(max) due to just the fact that some individuals are not successful, while Reduct_variance is the combined effect of both individuals not being successful at all and variance among family size.")
+
+```
+
+
+# Expected contribution per breeder for each spawning event
+
+Spawning event one, two, and three contained progeny from two, four, and three tanks, respectively. Putatively, each tank contains three females and two males, parentage assignment revealed that one adult assumed to be a female is actually male.
+
+For each spawning event, the expected proportion of progeny assigned per breeder was calculated as the proportion of progeny that should be assigned to a breeder if all breeders of the same sex were to contribute to a spawning event with equal success. 
+
+```{r}
+
+kable(
+  adults %>%
+    group_by(SPAWNING_EVENT) %>%
+    count(SEX) %>%
+    mutate(PERC_OFFSP = round(100/n, digits = 2)) %>%
+    ungroup(),
+  caption = "Table 2: Number of males and females per spawning event and expected percent of progeny assigned per breeder if all breeders contribute equally."
+)
+
+df <- adults %>%
+    group_by(SPAWNING_EVENT) %>%
+    count(SEX) %>%
+    mutate(PERC_OFFSP = round(100/n, digits = 2)) %>%
+    ungroup()
+
+write_delim(df, "results/fig/adults_per_event.csv", delim = ",")
+
+```
+
+
+# Spawning & reproductive success spawning event 1
+
+Spawning success of an adult was calculated as the proportion of progeny assigned to a given breeder at the first sampling point (T1) and reproductive success as the proportion of progeny assigned to a given breeder at the final sampling point (T3) when fingerlings were removed to be stocked in the bay.
+
+```{r}
+
+# write file with reproductive success ----
+success <- pedigree %>%
+    filter(GRP == "YOY-1") %>%
+    count(SAMPLE_POINT, sire) %>%
+    group_by(SAMPLE_POINT) %>%
+    mutate(freq = round(n/sum(n), digits = 3)) %>%
+    ungroup() %>%
+    select(-n) %>%
+    spread(key = SAMPLE_POINT, value = freq) %>%
+    mutate(GRP = "YOY1")
+
+write_delim(success, "results/M_YOY1.reprod", delim = "\t")
+
+kable(
+  success %>%
+    select(-GRP),
+  caption = "Table 3a: Proportion of progeny assigned per sire for each time point in pond 1"
+)
+
+
+# write file with reproductive success ----
+success <- pedigree %>%
+    filter(GRP == "YOY-1") %>%
+    count(SAMPLE_POINT, dam) %>%
+    group_by(SAMPLE_POINT) %>%
+    mutate(freq = round(n/sum(n), digits = 3)) %>%
+    ungroup() %>%
+    select(-n) %>%
+    spread(key = SAMPLE_POINT, value = freq) %>%
+    mutate(GRP = "YOY1")
+
+write_delim(success, "results/F_YOY1.reprod", delim = "\t")
+
+kable(
+  success %>%
+    select(-GRP),
+  caption = "Table 3b: Proportion of progeny assigned per dam for each time point in pond 1"
+)
+
+
+# compare contributions of pairs
+kable(
+  pedigree %>%
+    filter(GRP == "YOY-1" & SAMPLE_POINT == "T3") %>%
+    group_by(dam, sire) %>%
+    count() %>%
+    ungroup() %>%
+    mutate(frq = round(n/sum(n), digits = 2)),
+  caption = "Table 3c: Proportion of progeny assigned per pair at stocking."
+)
+
+```
+
+Adults from two spawning tanks contributed to pond 1. 
+
+```{r}
+
+kable(
+adults %>%
+  filter(SPAWNING_EVENT == "YOY-1") %>%
+  count(SEX) %>%
+  mutate(PERC_OFFSP = round(100/n, digits = 2)) %>%
+  ungroup(),
+caption = "Table 4: Proprtion of expected progeny assigned per breeder if all breeders are equally successful."
+)
+
+```
+
+Compare the difference in observed vs. expected number of progeny assigned to each breeder.
+
+```{r fig.cap="Figure 1: Difference of expected and observed proportion of progeny per male and female and total proportion per parent sent per sampling point (breeders that did not have any progeny assigned are not included in figure).", fig.height=8, fig.width=10}
+
+# sires ====
+temp <- adults %>%
+  filter(SPAWNING_EVENT == "YOY-1" & SEX == "M") %>%
+  rename(sire = SAMPLE_ID)
+
+sires <- pedigree %>%
+    filter(GRP == "YOY-1") %>%
+    count(SAMPLE_POINT, sire) %>%
+    group_by(SAMPLE_POINT) %>%
+    mutate(freq = round(n/sum(n), digits = 3),
+           FREQ_DIFF = freq-0.2) %>%
+    ungroup() %>%
+    select(-n) %>%
+    left_join(temp) %>%
+    filter(!is.na(sire)) %>%
+    arrange(FREQ_DIFF) %>%
+    mutate(BREEDER = "sire") %>%
+    rename(INDV = sire)
+
+
+# dames ====
+temp <- adults %>%
+  filter(SPAWNING_EVENT == "YOY-1" & SEX == "F") %>%
+  rename(dam = SAMPLE_ID)
+
+dams <- pedigree %>%
+    filter(GRP == "YOY-1") %>%
+    count(SAMPLE_POINT, dam) %>%
+    group_by(SAMPLE_POINT) %>%
+    mutate(freq = round(n/sum(n), digits = 3),
+           FREQ_DIFF = freq-0.2) %>%
+    ungroup() %>%
+    select(-n) %>%
+    left_join(temp) %>%
+    filter(!is.na(dam)) %>%
+    arrange(FREQ_DIFF) %>%
+    mutate(BREEDER = "dam") %>%
+    rename(INDV = dam) %>%
+    bind_rows(sires)
+
+write_delim(dams, "results/fig/expectVrealized.YOY1", delim = "\t")
+
+ggplot(dams, aes(x = FREQ_DIFF, y = INDV, fill = TANK)) +
+  geom_segment(aes(x = 0, y = INDV, xend = FREQ_DIFF, yend = INDV), color = "black") +
+  geom_point(shape = 21, size = 3) +
+  geom_vline(xintercept = 0, color = "darkred", linetype = "dashed") +
+  facet_grid(BREEDER ~ SAMPLE_POINT, scales = "free", space = "free") +
+  labs(x = "difference expected/observed prop of progeny", y = "Breeder") +
+  scale_fill_viridis_d() +
+  theme_standard
+
+```
+
+Compare proportion of progeny assigned to pairs of breeders.
+
+```{r fig.cap="Figure 2: Proportion of progeny assigned to pairs of breeders at each sampling point.", fig.height=6, fig.width=10}
+
+# parent pairs ===
+parents <- pedigree %>%
+    filter(GRP == "YOY-1") %>%
+    count(SAMPLE_POINT, dam, sire) %>%
+    group_by(SAMPLE_POINT) %>%
+    mutate(freq = round(n/sum(n), digits = 3),
+           ) %>%
+    ungroup() %>%
+    select(-n) %>%
+  unite(pair, dam, sire, sep = "-", remove = FALSE) %>%
+    filter(!pair == "NA-NA")
+
+write_delim(parents, "results/fig/full-sibs.YOY1")
+
+ggplot(parents, aes(x = freq, y = pair, fill = dam)) +
+  geom_segment(aes(x = 0, y = pair, xend = freq, yend = pair), color = "black") +
+  geom_point(size = 3, shape = 21) +
+  geom_vline(xintercept = 0, color = "darkred", linetype = "dashed") +
+  facet_grid(. ~ SAMPLE_POINT) +
+  labs(x = expression(atop("proportion of progeny assigned", "(spawning event 1)")),
+       y = "female x male cross") +
+  scale_fill_viridis_d() +
+  theme_standard
+
+```
+
+
+# Spawning/reproductive success spawning event 2
+
+Spawning success of an adult was calculated as the proportion of progeny assigned to a given adult at the first sampling point (T1) and reproductive success as the proportion of progeny assigned to a given breeder at the final sampling point (T3) when fingerlings were removed to be stocked in the bay.
+
+```{r}
+
+# write file with reproductive success ----
+success <- pedigree %>%
+    filter(GRP == "YOY-2") %>%
+    count(SAMPLE_POINT, sire) %>%
+    group_by(SAMPLE_POINT) %>%
+    mutate(freq = round(n/sum(n), digits = 3)) %>%
+    ungroup() %>%
+    select(-n) %>%
+    spread(key = SAMPLE_POINT, value = freq) %>%
+    mutate(GRP = "YOY2")
+
+write_delim(success, "results/M_YOY2.reprod", delim = "\t")
+
+
+kable(
+  success %>%
+    select(-GRP),
+  caption = "Table 5a: Proportion of progeny assigned per sire for each time point in pond 2."
+)
+
+
+# write file with reproductive success ----
+success <- pedigree %>%
+    filter(GRP == "YOY-2") %>%
+    count(SAMPLE_POINT, dam) %>%
+    group_by(SAMPLE_POINT) %>%
+    mutate(freq = round(n/sum(n), digits = 3)) %>%
+    ungroup() %>%
+    select(-n) %>%
+    spread(key = SAMPLE_POINT, value = freq) %>%
+    mutate(GRP = "YOY2")
+
+write_delim(success, "results/F_YOY2.reprod", delim = "\t")
+
+kable(
+  success %>%
+    select(-GRP),
+  caption = "Table 5b: Proportion of progeny assigned per dam for each time point in pond 2."
+)
+
+
+# compare contributions of pairs
+kable(
+  pedigree %>%
+    filter(GRP == "YOY-2" & SAMPLE_POINT == "T3") %>%
+    group_by(dam, sire) %>%
+    count() %>%
+    ungroup() %>%
+    mutate(frq = round(n/sum(n), digits = 2)),
+  caption = "Table 5c: Proportion of progeny assigned per pair at stocking."
+)
+
+```
+
+Adults from four spawning tanks contributed to spawning event 2.
+
+```{r}
+
+kable(
+adults %>%
+  filter(SPAWNING_EVENT == "YOY-2") %>%
+  count(SEX) %>%
+  mutate(PERC_OFFSP = round(100/n, digits = 2)) %>%
+  ungroup(),
+caption = "Table 6: Proprtion of expected progeny per breeder if all breeders are equally successful."
+)
+
+```
+
+Compare the difference in observed vs. expected number of progeny assigned to each breeder.
+
+```{r fig.cap="Figure 3: Difference of expected and observed proportion of progeny per male and female and total proportion per parent sent per sampling point (breeders that did not have any progeny assigned are not included in figure).", fig.height=8, fig.width=10}
+
+# sires ====
+temp <- adults %>%
+  filter(SPAWNING_EVENT == "YOY-2" & SEX == "M") %>%
+  rename(sire = SAMPLE_ID)
+
+sires <- pedigree %>%
+    filter(GRP == "YOY-2") %>%
+    count(SAMPLE_POINT, sire) %>%
+    group_by(SAMPLE_POINT) %>%
+    mutate(freq = round(n/sum(n), digits = 3),
+           FREQ_DIFF = freq-0.0909) %>%
+    ungroup() %>%
+    select(-n) %>%
+    left_join(temp) %>%
+    filter(!is.na(sire)) %>%
+    arrange(FREQ_DIFF) %>%
+    mutate(BREEDER = "sire") %>%
+    rename(INDV = sire)
+
+
+# dames ====
+temp <- adults %>%
+  filter(SPAWNING_EVENT == "YOY-2" & SEX == "F") %>%
+  rename(dam = SAMPLE_ID)
+
+dams <- pedigree %>%
+    filter(GRP == "YOY-2") %>%
+    count(SAMPLE_POINT, dam) %>%
+    group_by(SAMPLE_POINT) %>%
+    mutate(freq = round(n/sum(n), digits = 3),
+           FREQ_DIFF = freq-0.1111) %>%
+    ungroup() %>%
+    select(-n) %>%
+    left_join(temp) %>%
+    filter(!is.na(dam)) %>%
+    arrange(FREQ_DIFF) %>%
+    mutate(BREEDER = "dam") %>%
+    rename(INDV = dam) %>%
+    bind_rows(sires)
+
+write_delim(dams, "results/fig/expectVrealized.YOY2", delim = "\t")
+
+ggplot(dams, aes(x = FREQ_DIFF, y = INDV, fill = TANK)) +
+  geom_segment(aes(x = 0, y = INDV, xend = FREQ_DIFF, yend = INDV), color = "black") +
+  geom_point(shape = 21, size = 3) +
+  geom_vline(xintercept = 0, color = "darkred", linetype = "dashed") +
+  facet_grid(BREEDER ~ SAMPLE_POINT, scales = "free", space = "free") +
+  labs(x = "difference expected/observed prop of progeny", y = "Breeder") +
+  scale_fill_viridis_d() +
+  theme_standard
+
+```
+
+Compare proportion of progeny assigned to pairs of breeders.
+
+```{r fig.cap="Figure 4: Proportion of progeny assigned to pairs of breeders at each sampling point.", fig.height=6, fig.width=10}
+
+# parent pairs ===
+parents <- pedigree %>%
+    filter(GRP == "YOY-2") %>%
+    count(SAMPLE_POINT, dam, sire) %>%
+    group_by(SAMPLE_POINT) %>%
+    mutate(freq = round(n/sum(n), digits = 3)) %>%
+    ungroup() %>%
+    select(-n) %>%
+  unite(pair, dam, sire, sep = "-", remove = FALSE) %>%
+    filter(!pair == "NA-NA")
+
+write_delim(parents, "results/fig/full-sibs.YOY2")
+
+ggplot(parents, aes(x = freq, y = pair, fill = dam)) +
+  geom_segment(aes(x = 0, y = pair, xend = freq, yend = pair), color = "black") +
+  geom_point(size = 3, shape = 21) +
+  geom_vline(xintercept = 0, color = "darkred", linetype = "dashed") +
+  facet_grid(. ~ SAMPLE_POINT) +
+   labs(x = expression(atop("proportion of progeny assigned", "(spawning event 2)")),
+       y = "female x male cross") +
+  scale_fill_viridis_d() +
+  theme_standard
+
+```
+
+# Spawning/reproductive success spawning event 3
+
+Spawning success of an adult was calculated as the proportion of progeny assigned to a given adult at the first sampling point (T1) and reproductive success as the proportion of progeny assigned to a given breeder at the final sampling point (T3) when fingerlings were removed to be stocked in the bay.
+
+```{r}
+
+# write file with reproductive success ----
+success <- pedigree %>%
+    filter(GRP == "YOY-3") %>%
+    count(SAMPLE_POINT, sire) %>%
+    group_by(SAMPLE_POINT) %>%
+    mutate(freq = round(n/sum(n), digits = 3)) %>%
+    ungroup() %>%
+    select(-n) %>%
+    spread(key = SAMPLE_POINT, value = freq) %>%
+    mutate(GRP = "YOY3")
+
+write_delim(success, "results/M_YOY3.reprod", delim = "\t")
+
+kable(
+  success %>%
+    select(-GRP),
+  caption = "Table 7a: Proportion of progeny assigned per sire for each time point in pond 3."
+)
+
+
+# write file with reproductive success ----
+success <- pedigree %>%
+    filter(GRP == "YOY-3") %>%
+    count(SAMPLE_POINT, dam) %>%
+    group_by(SAMPLE_POINT) %>%
+    mutate(freq = round(n/sum(n), digits = 3)) %>%
+    ungroup() %>%
+    select(-n) %>%
+    spread(key = SAMPLE_POINT, value = freq) %>%
+    mutate(GRP = "YOY3")
+
+write_delim(success, "results/F_YOY3.reprod", delim = "\t")
+
+kable(
+  success %>%
+    select(-GRP),
+  caption = "Table 7b: Proportion of progeny assigned per dam for each time point in pond 3."
+)
+
+
+# compare contributions of pairs
+kable(
+  pedigree %>%
+    filter(GRP == "YOY-3" & SAMPLE_POINT == "T3") %>%
+    group_by(dam, sire) %>%
+    count() %>%
+    ungroup() %>%
+    mutate(frq = round(n/sum(n), digits = 2)),
+  caption = "Table 7c: Proportion of progeny per pair at stocking."
+)
+
+```
+
+Adults from three spawning tanks contributed to spawning event 3.
+
+```{r}
+
+kable(
+adults %>%
+  filter(SPAWNING_EVENT == "YOY-3") %>%
+  count(SEX) %>%
+  mutate(PERC_OFFSP = round(100/n, digits = 2)) %>%
+  ungroup(),
+caption = "Table 8: Proprtion of expected progeny per breeder if all breeders are equally successful."
+)
+
+```
+
+Compare the difference in observed vs. expected number of progeny assigned to each breeder.
+
+```{r fig.cap="Figure 5: Difference of expected and observed proportion of progeny per male and female and total proportion per set of parents per sampling point (breeders that did not have any progeny assigned are not included in figure).", fig.height=8, fig.width=10}
+
+# sires ====
+temp <- adults %>%
+  filter(SPAWNING_EVENT == "YOY-3" & SEX == "M") %>%
+  rename(sire = SAMPLE_ID)
+
+sires <- pedigree %>%
+    filter(GRP == "YOY-3") %>%
+    count(SAMPLE_POINT, sire) %>%
+    group_by(SAMPLE_POINT) %>%
+    mutate(freq = round(n/sum(n), digits = 3),
+           FREQ_DIFF = freq-0.1111) %>%
+    ungroup() %>%
+    select(-n) %>%
+    left_join(temp) %>%
+    filter(!is.na(sire)) %>%
+    arrange(FREQ_DIFF) %>%
+    mutate(BREEDER = "sire") %>%
+    rename(INDV = sire)
+
+
+# dames ====
+temp <- adults %>%
+  filter(SPAWNING_EVENT == "YOY-3" & SEX == "F") %>%
+  rename(dam = SAMPLE_ID)
+
+dams <- pedigree %>%
+    filter(GRP == "YOY-3") %>%
+    count(SAMPLE_POINT, dam) %>%
+    group_by(SAMPLE_POINT) %>%
+    mutate(freq = round(n/sum(n), digits = 3),
+           FREQ_DIFF = freq-0.1667) %>%
+    ungroup() %>%
+    select(-n) %>%
+    left_join(temp) %>%
+    filter(!is.na(dam)) %>%
+    arrange(FREQ_DIFF) %>%
+    mutate(BREEDER = "dam") %>%
+    rename(INDV = dam) %>%
+    bind_rows(sires)
+
+write_delim(dams, "results/fig/expectVrealized.YOY3", delim = "\t")
+
+ggplot(dams, aes(x = FREQ_DIFF, y = INDV, fill = TANK)) +
+  geom_segment(aes(x = 0, y = INDV, xend = FREQ_DIFF, yend = INDV), color = "black") +
+  geom_point(shape = 21, size = 3) +
+  geom_vline(xintercept = 0, color = "darkred", linetype = "dashed") +
+  facet_grid(BREEDER ~ SAMPLE_POINT, scales = "free", space = "free") +
+  labs(x = "difference expected/observed prop of progeny", y = "Breeder") +
+  scale_fill_viridis_d() +
+  theme_standard
+
+```
+
+Compare proportion of progeny assigned to pairs of breeders.
+
+```{r fig.cap="Figure 6: Proportion of progeny assigned to pairs of breeders at each sampling point.", fig.height=6, fig.width=10}
+
+# parent pairs ===
+parents <- pedigree %>%
+    filter(GRP == "YOY-3") %>%
+    count(SAMPLE_POINT, dam, sire) %>%
+    group_by(SAMPLE_POINT) %>%
+    mutate(freq = round(n/sum(n), digits = 3)) %>%
+    ungroup() %>%
+    select(-n) %>%
+  unite(pair, dam, sire, sep = "-", remove = FALSE) %>%
+    filter(!pair == "NA-NA")
+
+write_delim(parents, "results/fig/full-sibs.YOY3")
+
+ggplot(parents, aes(x = freq, y = pair, fill = dam)) +
+  geom_segment(aes(x = 0, y = pair, xend = freq, yend = pair), color = "black") +
+  geom_point(size = 3, shape = 21) +
+  geom_vline(xintercept = 0, color = "darkred", linetype = "dashed") +
+  facet_grid(. ~ SAMPLE_POINT) +
+  labs(x = expression(atop("proportion of progeny assigned", "(spawning event 3)")),
+       y = "female x male cross") +
+  scale_fill_viridis_d() +
+  theme_standard
+
+```
+
+
+# Comparison across spawning events
+
+## Comparison expected v realized reproductive success across spawning events
+
+```{r fig.cap="Figure 7: Comparison of expected and realized reproductive success per spawning event and sampling point for male and female broodfish", fig.width=7, fig.height=13}
+
+df1 <- read_delim("results/fig/expectVrealized.YOY1", delim = "\t")
+
+df2 <- read_delim("results/fig/expectVrealized.YOY2", delim = "\t")
+
+comp <- read_delim("results/fig/expectVrealized.YOY3", delim = "\t") %>%
+  bind_rows(df1) %>%
+  bind_rows(df2) %>%
+  unite(COMP, SPAWNING_EVENT, SEX, sep = "_", remove = FALSE) %>%
+  mutate(INDV = str_extract(INDV, "[[:digit:]]+")) %>%
+  unite(ADULT, SEX, INDV, sep = "_")
+
+ggplot(comp, aes(x = FREQ_DIFF, y = ADULT, fill = TANK)) +
+  geom_segment(aes(x = 0, y = ADULT, xend = FREQ_DIFF, yend = ADULT), color = "black") +
+  geom_point(shape = 21, size = 4) +
+  geom_vline(xintercept = 0, color = "darkred", linetype = "dashed") +
+  facet_grid(COMP ~ SAMPLE_POINT, scales = "free_y", space = "free") +
+  labs(x = "difference expected/observed prop of progeny", y = "Breeder") +
+  scale_fill_manual(values = col_tanks) +
+  theme_facet
+
+```
+
+Compare differences by breeder.
+
+```{r fig.cap="Figure 8: Comparison of expected and realized reproductive success per spawning event and sampling point for male and female broodfish that successfully participated in more than one spawning event.", fig.width=7, fig.height=11}
+
+comp_by_breeder <- comp %>%
+  count(ADULT) %>%
+  filter(n >= 6)
+
+tmp <- comp %>%
+  filter(ADULT %in% comp_by_breeder$ADULT)
+
+ggplot(tmp, aes(x = FREQ_DIFF, y = SPAWNING_EVENT, fill = SPAWNING_EVENT)) +
+  geom_segment(aes(x = 0, y = SPAWNING_EVENT, xend = FREQ_DIFF, yend = SPAWNING_EVENT), 
+               color = "black") +
+  geom_point(shape = 21, size = 4) +
+  geom_vline(xintercept = 0, color = "darkred", linetype = "dashed") +
+  facet_grid(ADULT ~ SAMPLE_POINT, scales = "free_y", space = "free") +
+  labs(x = "difference expected/observed prop of progeny", y = "Spawning Event") +
+  scale_fill_manual(values = col_events) +
+  theme_facet +
+  theme(axis.text.y = element_blank())
+
+```
+
+
+## Family-wise comparisons
+
+```{r fig.cap="Figure 9: Comparison of proportion of progeny assigned to each family (female x male cross) per spawning event and sampling point.", fig.width=7, fig.height=13}
+
+df1 <- read_delim("results/fig/full-sibs.YOY1", delim = " ") %>%
+  mutate(SPAWNING_EVENT = "YOY-1")
+
+df2 <- read_delim("results/fig/full-sibs.YOY2", delim = " ") %>%
+  mutate(SPAWNING_EVENT = "YOY-2")
+
+comp <- read_delim("results/fig/full-sibs.YOY3", delim = " ") %>%
+  mutate(SPAWNING_EVENT = "YOY-3") %>%
+  bind_rows(df1) %>%
+  bind_rows(df2) %>%
+  mutate(FEMALE = str_extract(dam, "[[:digit:]]+"),
+         MALE = str_extract(sire, "[[:digit:]]+"),
+         CROSS = glue("F_{FEMALE} x M_{MALE}"))
+
+ggplot(comp, aes(x = freq, y = CROSS, fill = SPAWNING_EVENT)) +
+  geom_segment(aes(x = 0, y = CROSS, xend = freq, yend = CROSS), color = "black") +
+  geom_point(size = 4, shape = 21) +
+  geom_vline(xintercept = 0, color = "darkred", linetype = "dashed") +
+  facet_grid(SPAWNING_EVENT ~ SAMPLE_POINT, scales = "free_y", space = "free") +
+  scale_fill_manual(values = col_events) +
+  scale_x_continuous(limits = c(0, 1)) +
+  labs(x = "proportion of progeny assigned", y = " ") +
+  theme_facet +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+# mean family size
+kable(
+  comp %>%
+    group_by(SPAWNING_EVENT) %>%
+    summarize(mean = round(mean(freq), digits = 3),
+              sd = round(sd(freq), digits = 3),
+              min = round(min(freq), digits = 3),
+              max = round(max(freq), digits = 3)),
+  caption = "Table 9a: Mean family size (as proportion of total progeny) per spawning event."
+)
+
+
+# mean number of females a male breeds with
+kable(
+  comp %>%
+    filter(SAMPLE_POINT == "T3") %>%
+    group_by(SPAWNING_EVENT) %>%
+    count(sire) %>%
+    summarise(`mean female partners` = round(mean(n), digits = 1)) %>%
+    ungroup(),
+  caption = "Table 9b: Number of females a male breeds with (putatively three females and two males present in a spawning tank)."
+)
+
+
+# mean number of males a female breeds with
+kable(
+  comp %>%
+    filter(SAMPLE_POINT == "T3") %>%
+    group_by(SPAWNING_EVENT) %>%
+    count(dam) %>%
+    summarise(`mean male partners` = round(mean(n), digits = 1)) %>%
+    ungroup(),
+  caption = "Table 9c: Number of males a female breeds with (putatively three females and two males present in a spawning tank)."
+)
+
+```
+
+
+# Comparison of reproductive success among breeders
+
+The proportion of progeny assigned to breeders at sampling points T1 and T3 was compared to identify differences in spawning and reproductive success among and within breeders.
+
+```{r fig.cap="Figure 10: Comparison of proportion of progeny released per pond assigned to each breeder. Breeders that were in the spawning tanks contributing to a spawning event (SPAWNERS = SP) are denoted as filled circles (YOY1 = yellow, YOY2 = turquoise, YOY3 = purple), even if they did not successfully produce progeny. Breeders that were not in the spawning tanks (SPAWNERS = NOT) for a given spawning event are denoted with an x.", fig.height=12, fig.width=8}
+
+# females
+tmp <- adults %>%
+  select(SAMPLE_ID, SPAWNING_EVENT) %>%
+  rename(GRP = SPAWNING_EVENT,
+         dam = SAMPLE_ID) %>%
+  mutate(SPAWNERS = "SP")
+
+comp_f <- pedigree %>%
+  filter(SAMPLE_POINT == "T3") %>%
+  select(dam, GRP) %>%
+  count(dam, GRP) %>%
+  group_by(GRP) %>%
+  mutate(freq = round(n/sum(n), digits = 3)) %>%
+  ungroup() %>%
+  select(-n) %>%
+  spread(key = GRP, value = freq) %>%
+  mutate(`YOY-1` = replace_na(`YOY-1`, 0),
+         `YOY-2` = replace_na(`YOY-2`, 0),
+         `YOY-3` = replace_na(`YOY-3`, 0)) %>%
+  gather(key = GRP, value = freq, 2:4) %>%
+  left_join(tmp) %>%
+  mutate(SPAWNERS = replace_na(SPAWNERS, "NOT"),
+         SEX = "females") %>%
+  rename(BREEDER = dam)
+
+# males
+tmp <- adults %>%
+  select(SAMPLE_ID, SPAWNING_EVENT) %>%
+  rename(GRP = SPAWNING_EVENT,
+         sire = SAMPLE_ID) %>%
+  mutate(SPAWNERS = "SP")
+
+comp <- pedigree %>%
+  filter(SAMPLE_POINT == "T3") %>%
+  select(sire, GRP) %>%
+  filter(!sire == "M0004") %>%
+  count(sire, GRP) %>%
+  group_by(GRP) %>%
+  mutate(freq = round(n/sum(n), digits = 3)) %>%
+  ungroup() %>%
+  select(-n) %>%
+  spread(key = GRP, value = freq) %>%
+  mutate(`YOY-1` = replace_na(`YOY-1`, 0),
+         `YOY-2` = replace_na(`YOY-2`, 0),
+         `YOY-3` = replace_na(`YOY-3`, 0)) %>%
+  gather(key = GRP, value = freq, 2:4) %>%
+  left_join(tmp) %>%
+   mutate(SPAWNERS = replace_na(SPAWNERS, "NOT"),
+         SEX = "males") %>%
+  rename(BREEDER = sire) %>%
+  bind_rows(comp_f)
+
+# plot
+ggplot(comp, aes(x = BREEDER, y = freq, fill = GRP, shape = SPAWNERS)) +
+  geom_linerange(aes(x = BREEDER, ymin = 0, ymax = freq), 
+                position = position_dodge(width = 1)) +
+  geom_point(size = 3,
+            position = position_dodge(width = 1)) +
+  geom_hline(yintercept = 0, color = "darkred", linetype = "dashed") +
+  coord_flip() +
+  scale_fill_viridis_d() +
+  scale_shape_manual(values = c(13, 21)) +
+  facet_grid(SEX ~ ., scales = "free", space = "free") +
+  labs(y = "reproductive success", x = " ") +
+  theme_standard +
+  guides(fill = guide_legend(override.aes = list(shape = 21)))
+
+```
+
+Compare across sampling points
+
+```{r fig.cap="Figure 11: Comparison of proportion of progeny assigned to each broodfish per spawning event and sampling point (T1, blue; T2, green, T3, red). Broodstock that were in the spawning tanks contributing to a spawning event (SPAWNERS = SP) are included, even if they did not successfully produce progeny. Breeders that were not in the spawning tanks (SPAWNERS = NOT) for a given spawning event are denoted with an x.", fig.height=12, fig.width=8}
+
+# females
+tmp <- adults %>%
+  select(SAMPLE_ID, SPAWNING_EVENT) %>%
+  rename(GRP = SPAWNING_EVENT,
+         dam = SAMPLE_ID) %>%
+  mutate(SPAWNERS = "SP")
+
+comp_f <- pedigree %>%
+  select(dam, GRP, SAMPLE_POINT) %>%
+  count(dam, GRP, SAMPLE_POINT) %>%
+  group_by(GRP, SAMPLE_POINT) %>%
+  mutate(freq = round(n/sum(n), digits = 3)) %>%
+  ungroup() %>%
+  select(-n) %>%
+  unite(GRP_T, GRP, SAMPLE_POINT, sep = "_") %>%
+  spread(key = GRP_T, value = freq) %>%
+  mutate(`YOY-1_T1` = replace_na(`YOY-1_T1`, 0),
+         `YOY-1_T2` = replace_na(`YOY-1_T2`, 0),
+         `YOY-1_T3` = replace_na(`YOY-1_T3`, 0),
+         `YOY-2_T1` = replace_na(`YOY-2_T1`, 0),
+         `YOY-2_T2` = replace_na(`YOY-2_T2`, 0),
+         `YOY-2_T3` = replace_na(`YOY-2_T3`, 0),
+         `YOY-3_T1` = replace_na(`YOY-3_T1`, 0),
+         `YOY-3_T2` = replace_na(`YOY-3_T2`, 0),
+         `YOY-3_T3` = replace_na(`YOY-3_T3`, 0)) %>%
+  gather(key = GRP_T, value = freq, 2:10) %>%
+  separate(GRP_T, into = c("GRP", "SAMPLE_POINT"), sep = "_") %>%
+  left_join(tmp) %>%
+  mutate(SPAWNERS = replace_na(SPAWNERS, "NOT"),
+         SEX = "females") %>%
+  rename(BREEDER = dam)
+
+# males
+tmp <- adults %>%
+  select(SAMPLE_ID, SPAWNING_EVENT) %>%
+  rename(GRP = SPAWNING_EVENT,
+         sire = SAMPLE_ID) %>%
+  mutate(SPAWNERS = "SP")
+
+comp <- pedigree %>%
+  select(sire, GRP, SAMPLE_POINT) %>%
+  count(sire, GRP, SAMPLE_POINT) %>%
+  group_by(GRP, SAMPLE_POINT) %>%
+  mutate(freq = round(n/sum(n), digits = 3)) %>%
+  ungroup() %>%
+  select(-n) %>%
+  unite(GRP_T, GRP, SAMPLE_POINT, sep = "_") %>%
+  spread(key = GRP_T, value = freq) %>%
+  mutate(`YOY-1_T1` = replace_na(`YOY-1_T1`, 0),
+         `YOY-1_T2` = replace_na(`YOY-1_T2`, 0),
+         `YOY-1_T3` = replace_na(`YOY-1_T3`, 0),
+         `YOY-2_T1` = replace_na(`YOY-2_T1`, 0),
+         `YOY-2_T2` = replace_na(`YOY-2_T2`, 0),
+         `YOY-2_T3` = replace_na(`YOY-2_T3`, 0),
+         `YOY-3_T1` = replace_na(`YOY-3_T1`, 0),
+         `YOY-3_T2` = replace_na(`YOY-3_T2`, 0),
+         `YOY-3_T3` = replace_na(`YOY-3_T3`, 0)) %>%
+  gather(key = GRP_T, value = freq, 2:10) %>%
+  separate(GRP_T, into = c("GRP", "SAMPLE_POINT"), sep = "_") %>%
+  left_join(tmp) %>%
+  mutate(SPAWNERS = replace_na(SPAWNERS, "NOT"),
+         SEX = "males") %>%
+  rename(BREEDER = sire) %>%
+  bind_rows(comp_f) %>%
+  mutate(BREEDER = str_extract(BREEDER, "[[:digit:]]+"))
+
+ggplot(comp, aes(x = BREEDER, y = freq, fill = SAMPLE_POINT, shape = SPAWNERS, group = BREEDER)) +
+  geom_line(color = "black", size = 1.5) +
+  geom_point(size = 4) +
+  geom_hline(yintercept = 0, color = "darkred", linetype = "dashed") +
+  coord_flip() +
+  scale_fill_manual(values = col_events) +
+  scale_shape_manual(values = c(13, 21)) +
+  facet_grid(SEX ~ GRP, scales = "free_y", space = "free") +
+  labs(y = "reproductive success", x = " ") +
+  theme_facet +
+  guides(fill = guide_legend(override.aes = list(shape = 21)))
+
+```
+
+
+# Relationship of age and time spent in hatchery with reproductive success
+
+## Estimate approximate age of breeders
+
+Total length and weight was determined for adult red drum caught in the wild and introduced to the hatchery as breeders. Condition at introduction was calculated as the weigt/length ratio (measurements in milimeters and grams). The approximate age at introduction to the hatchery was determined using an age-length regression [@Porch2002] which implements a dampend growth model able to account for a decrease in the growth rate over the lifetime of red drum. Approximate age at spawning was determined as the sum of age at introduction and the time spent in the hatchery.
+
+```{r}
+
+# Function to calculate age from length according to Porch et al 2002
+source("scr/porch_et_al.R")
+
+# estimate age using Powers et al.
+length <- read_delim("data/ASSIGNMENT/Adult_info.txt", delim = "\t") %>%
+  mutate(LENGTH_INCH = LENGTH*0.0393701)
+
+# estimate age using Porch Model  
+porch_estim <- as.numeric()
+
+
+for(i in 1:nrow(length)){
+  
+  porch_estim[i] <- round(uniroot(growth6, interval = c(-1e100,1e100), lt = (length$LENGTH_INCH[i]))$root, digits = 1)
+  
+}
+
+porch_estim <- as.data.frame(porch_estim) %>%
+  rename(AGE_INTROD = porch_estim)
+
+# calculate age at spawning/time in hatchery
+adults <- read_delim("data/ASSIGNMENT/Adult_info.txt", delim = "\t") %>%
+  bind_cols(porch_estim) %>%
+  mutate(AGE_SPAWN = case_when(SPAWNING_EVENT == "YOY-1" ~ AGE_INTROD+2017-SEASON_PUT_IN_ROOM,
+                               SPAWNING_EVENT %in% c("YOY-2", "YOY-3") ~ AGE_INTROD+2018-SEASON_PUT_IN_ROOM),
+         TIME_HATCHERY = case_when(SPAWNING_EVENT == "YOY-1" ~ 2017-SEASON_PUT_IN_ROOM,
+                                   SPAWNING_EVENT %in% c("YOY-2", "YOY-3") ~ 2018-SEASON_PUT_IN_ROOM)) %>%
+  as.data.frame()
+
+```
+
+
+## Determine mean spawning/reproductive success per breeder
+
+Mean reproductive success at sample points T1 and T3 per breeder was determined as the mean proprotion of progeny assigned to an adult across spawning events (adults participated in one to three events). 
+
+```{r fig.cap="Figure 13: Spawning and reproductive success per breeder/spawning event.", fig.height=9, fig.width=10}
+
+# get reproductive success results
+filenames <- list.files(path = "results", pattern = "*.reprod")
+
+# import data
+reprod <- list()
+
+for (i in filenames){
+  
+  filepath <- file.path("results", i)
+  
+  reprod[[i]] <- read_delim(filepath, delim = "\t") %>%
+    select(1, 2, 4, 5)
+  
+  colnames(reprod[[i]]) <- c("SAMPLE_ID", "SPAWN_SUCC", "REPROD_SUCC", "GRP")
+  
+}
+
+reprod <- reprod[2:7]
+
+reprod <- ldply(reprod, data.frame) %>%
+  select(-`.id`) %>%
+  filter(!is.na(REPROD_SUCC)) %>%
+  mutate(SPAWNING_EVENT = case_when(GRP == "YOY1" ~ "YOY-1",
+                                    GRP == "YOY2" ~ "YOY-2",
+                                    GRP == "YOY3" ~ "YOY-3")) %>%
+  select(-GRP)
+
+# combine with adult information
+adults <- adults %>%
+  left_join(reprod) %>%
+  mutate(REPROD_SUCC = replace_na(REPROD_SUCC, 0)) %>%
+  mutate(SPAWN_SUCC = replace_na(SPAWN_SUCC, 0)) %>%
+  select(SAMPLE_ID, SEX, TANK, SPAWNING_EVENT, SPAWN_SUCC, REPROD_SUCC, 
+         LENGTH, WEIGHT, AGE_INTROD, SEASON_PUT_IN_ROOM, TIME_HATCHERY, AGE_SPAWN) %>%
+  group_by(SAMPLE_ID) %>%
+  mutate(MEAN_REPROD = round(mean(REPROD_SUCC), digits = 3),
+         STD_REPROD = round(sd(REPROD_SUCC), digits = 3),
+         MEAN_SPAWN = round(mean(SPAWN_SUCC), digits = 3),
+         STD_SPAWN = round(sd(SPAWN_SUCC), digits = 3)) %>%
+  mutate(STD_REPROD = replace_na(STD_REPROD, 0),
+         STD_SPAWN = replace_na(STD_SPAWN, 0),
+         EVENTS_PARTICIPATED = n()) %>%
+  ungroup()
+
+write_delim(adults, "results/all_adults.reprod", delim = "\t")
+
+t <- adults %>%
+  select(SAMPLE_ID, SEX, REPROD_SUCC, SPAWN_SUCC) %>%
+  gather(key = SUCCESS, value = PROPORTION_ASSIGNED, 3:4)
+
+ggplot(t, aes(x = SAMPLE_ID, y = PROPORTION_ASSIGNED)) +
+    geom_boxplot(outlier.shape = NA, alpha = 0.25, color = "black", fill = "grey65") +
+    geom_jitter(width = 0.05, shape = 21, size = 3.5, color = "black", alpha = 0.75, fill = "darkgreen") +
+    facet_grid(SEX ~ SUCCESS, space = "free", scales = "free") +
+    coord_flip() +
+    labs(x = "breeder", y = "porportion progeny assigned") +
+    scale_fill_manual(values = c("darkblue", "darkgreen", "darkred")) +
+    theme_facet +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+
+# table with mean spawning and reproductive success/events participated
+kable(adults %>%
+        select(-TANK, -SPAWNING_EVENT, -SPAWN_SUCC, -REPROD_SUCC, -AGE_SPAWN, -LENGTH, -WEIGHT, -SEASON_PUT_IN_ROOM) %>%
+        distinct(SAMPLE_ID, .keep_all = TRUE) %>%
+        arrange(SEX, SAMPLE_ID) %>%
+        rename(N_EVENTS = EVENTS_PARTICIPATED),
+      align=rep('l', length(mtcars[,1])),
+      caption = "Table 10: Mean spawning and reproductive success per breeder")
+
+```
+
+
+## Comparison of age related data to reproductive success categories
+
+Breeders that participated in multiple events were categorized as 'always successful', 'not always successful', and 'never successful' and their mean age at introduction, condition, spawning age, and time spent in the hatchery compared.
+
+```{r}
+
+df <- adults %>%
+  mutate(WEIGHT = ifelse(WEIGHT == 0, NA, WEIGHT),
+         COND_INTROD = (WEIGHT*1000)/LENGTH,
+         DIFF_SUCCESS = MEAN_SPAWN-MEAN_REPROD) %>%
+  distinct(SAMPLE_ID, .keep_all = TRUE)
+
+not <- adults %>%
+  filter(SPAWN_SUCC == 0)
+
+# calculate age stats for indv no progeny assigned at least once
+tmp <- df %>%
+  filter(SAMPLE_ID %in% not$SAMPLE_ID) %>%
+  distinct(SAMPLE_ID, .keep_all = TRUE)
+
+mean_age_not_min_once <- mean(tmp$AGE_SPAWN)
+mean_age_introd_not_min_once <- mean(tmp$AGE_INTROD)
+mean_time_in_hatch_not_min_once <- mean(tmp$TIME_HATCHERY)
+
+df_sometimes <- tmp %>%
+  select(SAMPLE_ID, AGE_SPAWN, AGE_INTROD, TIME_HATCHERY, COND_INTROD, DIFF_SUCCESS) %>%
+  mutate(CATEGORY = "sometimes")
+
+# calculate age stats indv no progeny ever
+never <- not %>%
+  group_by(SAMPLE_ID) %>%
+  count(SPAWN_SUCC == 0) %>%
+  left_join(df) %>%
+  mutate(PROP_UNSUCC = n/EVENTS_PARTICIPATED) %>%
+  filter(PROP_UNSUCC == 1)
+
+tmp <- df %>%
+  filter(SAMPLE_ID %in% never$SAMPLE_ID) %>%
+  distinct(SAMPLE_ID, .keep_all = TRUE)
+
+mean_age_never <- mean(tmp$AGE_SPAWN)
+mean_age_introd_never <- mean(tmp$AGE_INTROD)
+mean_time_in_hatch_never <- mean(tmp$TIME_HATCHERY)
+
+df_never <- tmp %>%
+  select(SAMPLE_ID, AGE_SPAWN, AGE_INTROD, TIME_HATCHERY, COND_INTROD, DIFF_SUCCESS) %>%
+  mutate(CATEGORY = "never") %>%
+  bind_rows(df_sometimes)
+
+
+# calculate age stats for indv always spawn
+tmp <- df %>%
+  filter(!SAMPLE_ID %in% never$SAMPLE_ID) %>%
+  distinct(SAMPLE_ID, .keep_all = TRUE)
+
+mean_age_always <- mean(tmp$AGE_SPAWN)
+mean_age_introd_always <- mean(tmp$AGE_INTROD)
+mean_time_in_hatch_always <- mean(tmp$TIME_HATCHERY)
+
+df <- tmp %>%
+  select(SAMPLE_ID, AGE_SPAWN, AGE_INTROD, TIME_HATCHERY, COND_INTROD, DIFF_SUCCESS) %>%
+  mutate(CATEGORY = "always") %>%
+  bind_rows(df_never)
+
+kable(
+  df %>%
+    group_by(CATEGORY) %>%
+    summarize(n = n(),
+              mean_SPAWN = mean(AGE_SPAWN),
+              sd_spawn = sd(AGE_SPAWN),
+              mean_INTROD = mean(AGE_INTROD),
+              sd_introd = sd(AGE_INTROD),
+              mean_HATCHERY = mean(TIME_HATCHERY),
+              sd_hatch = sd(TIME_HATCHERY),
+              mean_COND = mean(COND_INTROD, na.rm = TRUE),
+              sd_COND = sd(COND_INTROD, na.rm = TRUE),
+              mean_DIFF = mean(DIFF_SUCCESS),
+              sd_DIFF = sd(DIFF_SUCCESS)),
+  caption = "Table 11: Mean +/- sd of conditioning parameters of broodfish that participated in multiple spawning events."
+)
+
+```
+
+The mean age at spawning for breeders that were never successful spawners for any event they participated in is `r round(mean_age_never, digits = 1)`, they spent a mean `r mean_time_in_hatch_never` years in the hatchery and were on average `r round(mean_age_introd_never, digits = 1)` years old when introduced to the hatchery.
+
+Similarly, for breeders that were not successful spawners at least once the mean age at spawning is `r round(mean_age_not_min_once, digits = 1)`, they spent `r mean_time_in_hatch_not_min_once` years in the hatchery and were `r round(mean_age_introd_not_min_once, digits = 1)` years old on average when introduced to the hatchery.
+
+In contrast, breeders that were always successful spawners spawn at a mean age of `r round(mean_age_always, digits = 1)`, spent a mean `r mean_time_in_hatch_always` years in the hatchery, and were introduced to the hatchery at `r round(mean_age_introd_always, digits = 1)` years old.
+
+Test for significant difference among mean at at spawning using an ANOVA and pairwise comparisons using Tukey's 'Honest Significant Difference' method (based on Studentized range statistic) which uses intervals based on the range of the sample means (not individual diferences) with an adjustment for differences of observations made for each category.
+
+
+**Age at spawning**
+
+Test for heterogeneity using ANOVA and significant pairwise differences using Tukey HSD statistic.
+
+```{r}
+
+## test for significant diferences AGE SPAWN ----
+
+# plot comparisons
+age_spawn <- df %>%
+  select(AGE_SPAWN, CATEGORY) %>%
+  mutate(CATEGORY = ordered(CATEGORY, levels = c("always", "sometimes", "never")))
+
+p1 <- ggplot(age_spawn, aes(x = CATEGORY, y = AGE_SPAWN, fill = CATEGORY)) +
+  geom_boxplot(alpha = 0.5) +
+  geom_jitter(shape = 21, size = 3, position = position_jitter(0.1)) +
+  scale_fill_manual(values = c("#4473c4", "#3d6623", "#7008A0")) +
+  labs(x = "", y = "age at spawning") +
+  theme_standard +
+  theme(legend.position = "none",
+        axis.text.x=element_blank())
+
+# anova
+anova <- aov(AGE_SPAWN~CATEGORY, data = age_spawn)
+
+writeLines("\n RESULTS ANOVA")
+summary(anova)
+
+# Tukey
+writeLines("\n \nRESULTS PAIRWISE COMPARISONS USING TUKEY HONEST SIGNIFICANT DIFFERENCES")
+TukeyHSD(anova)
+
+```
+
+
+**Age at introduction to hatchery**
+
+Test for heterogeneity using ANOVA and significant pairwise differences using Tukey HSD statistic.
+
+```{r}
+
+## test for significant diferences AGE INTRODUCED ----
+
+# plot comparisons
+age_introd <- df %>%
+  select(AGE_INTROD, CATEGORY) %>%
+  mutate(CATEGORY = ordered(CATEGORY, levels = c("always", "sometimes", "never")))
+
+p2 <- ggplot(age_introd, aes(x = CATEGORY, y = AGE_INTROD, fill = CATEGORY)) +
+  geom_boxplot(alpha = 0.5) +
+  geom_jitter(shape = 21, size = 3, position = position_jitter(0.1)) +
+  scale_fill_manual(values = c("#4473c4", "#3d6623", "#7008A0")) +
+  labs(x = "", y = "age introduced") +
+  theme_standard +
+  theme(legend.position = "none",
+        axis.text.x=element_blank())
+
+# anova
+anova <- aov(AGE_INTROD~CATEGORY, data = age_introd)
+
+writeLines("\nRESULTS ANOVA")
+summary(anova)
+
+# Tukey
+writeLines("\n \nRESULTS PAIRWISE COMPARISONS USING TUKEY HONEST SIGNIFICANT DIFFERENCES")
+TukeyHSD(anova)
+
+```
+
+
+**Time spent in hatchery**
+
+Test for heterogeneity using ANOVA and significant pairwise differences using Tukey HSD statistic.
+
+```{r}
+
+## test for significant diferences TIME HATCHERY ----
+
+# plot comparisons
+time_hatch <- df %>%
+  select(TIME_HATCHERY, CATEGORY) %>%
+  mutate(CATEGORY = ordered(CATEGORY, levels = c("always", "sometimes", "never")))
+
+p3 <- ggplot(time_hatch, aes(x = CATEGORY, y = TIME_HATCHERY, fill = CATEGORY)) +
+  geom_boxplot(alpha = 0.5) +
+  geom_jitter(shape = 21, size = 3, position = position_jitter(0.1)) +
+  scale_fill_manual(values = c("#4473c4", "#3d6623", "#7008A0")) +
+  labs(x = "", y = "time hatchery") +
+  theme_standard +
+  theme(legend.position = "none",
+        axis.text.x=element_blank())
+
+# anova
+anova <- aov(TIME_HATCHERY~CATEGORY, data = time_hatch)
+
+writeLines("\nRESULTS ANOVA")
+summary(anova)
+
+# Tukey
+writeLines("\n \nRESULTS PAIRWISE COMPARISONS USING TUKEY HONEST SIGNIFICANT DIFFERENCES")
+TukeyHSD(anova)
+
+```
+
+
+**Condition at introduction**
+
+Test for heterogeneity using ANOVA and significant pairwise differences using Tukey HSD statistic.
+
+```{r}
+
+## test for significant diferences CONDITION INTRODUCED ----
+
+# plot comparisons
+cond_introd <- df %>%
+  select(COND_INTROD, CATEGORY) %>%
+  mutate(CATEGORY = ordered(CATEGORY, levels = c("always", "sometimes", "never")))
+
+p4 <- ggplot(cond_introd, aes(x = CATEGORY, y = COND_INTROD, fill = CATEGORY)) +
+  geom_boxplot(alpha = 0.5) +
+  geom_jitter(shape = 21, size = 3, position = position_jitter(0.1)) +
+  scale_fill_manual(values = c("#4473c4", "#3d6623", "#7008A0")) +
+  labs(x = "", y = "condition introduction") +
+  theme_standard +
+  theme(legend.position = "none",
+        axis.text.x=element_blank())
+
+# anova
+anova <- aov(COND_INTROD~CATEGORY, data = cond_introd)
+
+writeLines("\nRESULTS ANOVA")
+summary(anova)
+
+# Tukey
+writeLines("\n \nRESULTS PAIRWISE COMPARISONS USING TUKEY HONEST SIGNIFICANT DIFFERENCES")
+TukeyHSD(anova)
+
+```
+
+
+**Difference reproductive success T1-T3**
+
+Test for heterogeneity using ANOVA and significant pairwise differences using Tukey HSD statistic.
+
+```{r}
+
+## test for significant diferences CONDITION INTRODUCED ----
+
+# plot comparisons
+diff_succ <- df %>%
+  select(DIFF_SUCCESS, CATEGORY) %>%
+  mutate(CATEGORY = ordered(CATEGORY, levels = c("always", "sometimes", "never")))
+
+p5 <- ggplot(diff_succ, aes(x = CATEGORY, y = DIFF_SUCCESS, fill = CATEGORY)) +
+  geom_boxplot(alpha = 0.5) +
+  geom_jitter(shape = 21, size = 3, position = position_jitter(0.1)) +
+  scale_fill_manual(values = c("#4473c4", "#3d6623", "#7008A0")) +
+  labs(x = "", y = "difference success T1-T3") +
+  theme_standard +
+  theme(legend.position = "none",
+        axis.text.x=element_blank())
+# anova
+anova <- aov(DIFF_SUCCESS~CATEGORY, data = diff_succ)
+
+writeLines("\nRESULTS ANOVA")
+summary(anova)
+
+# Tukey
+writeLines("\n \nRESULTS PAIRWISE COMPARISONS USING TUKEY HONEST SIGNIFICANT DIFFERENCES")
+TukeyHSD(anova)
+
+```
+
+
+Compare median of distribution of observations
+
+```{r fig.cap="Figure 14: Distribution of mean age at spawning, mean at at introduction to the hatchery, and time spent in the hatchery before spawning event for breeders that participated in multiple spawning events", fig.height=4, fig.width=8}
+
+multiplot(p1, p2, p3, p4, p5, cols = 5)
+
+```
+
+
+## Comparison of reproductive success at T1 and T3 and conditioning parameters
+
+```{r fig.cap="Figure 15: Reproductive success at sampling points T1 and T3 related to conditioning parameters using each spawning event as an independet observation.", fig.height=15, fig.width=10}
+
+library(ggpmisc)
+
+tmp <- adults %>%
+  mutate(COND_INTROD = (WEIGHT*1000)/LENGTH,
+         DIFF_SUCCESS = SPAWN_SUCC-REPROD_SUCC) %>%
+  select(SAMPLE_ID, SEX, TANK, SPAWNING_EVENT, SPAWN_SUCC, 
+         REPROD_SUCC,
+         COND_INTROD,
+         AGE_INTROD, TIME_HATCHERY, AGE_SPAWN) %>%
+  gather(key = VARIABLES, value = VALUE, 6:10) %>%
+  mutate(VARIABLES = ordered(VARIABLES,
+                             levels = c("AGE_INTROD", "AGE_SPAWN", "TIME_HATCHERY", "COND_INTROD", "REPROD_SUCC")))
+
+# set formula for regression
+my.formula <- y ~ x
+
+p1 <- ggplot(tmp, aes(x = VALUE, y = SPAWN_SUCC, group = SEX, fill = SPAWNING_EVENT)) +
+  geom_smooth(method = "lm", color = "black", se = FALSE, formula = my.formula) +
+  geom_point(size = 2, shape = 21) +
+  stat_poly_eq(formula = my.formula, 
+               aes(label = paste(..rr.label.., sep = "~~~")), 
+               parse = TRUE) +
+  #stat_fit_glance(method = 'lm', method.args = list(formula = my.formula), 
+  #                geom = 'text',
+  #                aes(label = paste("P = ", signif(..p.value.., digits = 4), sep = ""))) +
+  facet_grid(SEX ~ VARIABLES, scales = "free") +
+  scale_fill_manual(values = col_events) +
+  labs(y = "reproductive success (T1)", x = "") +
+  theme_facet
+
+tmp <- adults %>%
+  mutate(WEIGHT = ifelse(WEIGHT == 0, NA, WEIGHT),
+         COND_INTROD = (WEIGHT*1000)/LENGTH,
+         DIFF_SUCCESS = MEAN_SPAWN-MEAN_REPROD) %>%
+  select(SAMPLE_ID, SEX, TANK, SPAWNING_EVENT, REPROD_SUCC, 
+         SPAWN_SUCC, 
+         COND_INTROD,
+         AGE_INTROD, TIME_HATCHERY, AGE_SPAWN) %>%
+  gather(key = VARIABLES, value = VALUE, 6:10) %>%
+  mutate(VARIABLES = ordered(VARIABLES,
+                             levels = c("AGE_INTROD", "AGE_SPAWN", "TIME_HATCHERY",
+                                        "COND_INTROD", "SPAWN_SUCC")))
+
+# set formula for regression
+my.formula <- y ~ x
+
+p2 <- ggplot(tmp, aes(x = VALUE, y = REPROD_SUCC, group = SEX, fill = SPAWNING_EVENT)) +
+  geom_smooth(method = "lm", color = "black", se = FALSE, formula = my.formula) +
+  geom_point(size = 2, shape = 21) +
+  stat_poly_eq(formula = my.formula, 
+               aes(label = paste(..rr.label.., sep = "~~~")), 
+               parse = TRUE) +
+  facet_grid(SEX ~ VARIABLES, scales = "free") +
+  scale_fill_manual(values = col_events) +
+  labs(y = "reproductive success (T3)", x = "") +
+  theme_facet
+
+multiplot(p1, p2, cols = 1)
+
+```

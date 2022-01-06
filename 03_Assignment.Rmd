@@ -1,0 +1,503 @@
+---
+title: "Parentage Assignment and Sibship Clustering"
+subtitle: "Comparison of reproductive success in red drum hatchery adults"
+author: "SJ O'Leary"
+date: "`r Sys.Date()`"
+output: tint::tintHtml
+bibliography: SOC.bib
+link-citations: yes
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+
+
+# load libraries and functions ====
+
+# load libraries
+library(tint)
+library(knitr)
+library(glue)
+library(sequoia)
+source("scr/libraries.R")
+
+# load functions
+source("scr/ggplot.R")
+source("scr/VCFfilterstats.R")
+source("scr/HaplotypR.R")
+source("scr/xtrafunctions.R")
+source("scr/genind.R")
+
+# OTHER OPTIONS ====
+
+# set how numbers are printed
+options(scipen=999)
+
+# invalidate cache when the package version changes
+knitr::opts_chunk$set(
+	message = FALSE,
+	warning = FALSE,
+	cache.extra = packageVersion("tint"),
+	tidy = FALSE,
+	echo = FALSE
+)
+
+options(htmltools.dir.version = FALSE)
+
+```
+
+# Sampling Design
+
+```{r}
+
+adults <- read_delim("data/ASSIGNMENT/Adult_info.txt", delim = "\t")
+
+# YOY1
+kable(
+  adults %>%
+    filter(SPAWNING_EVENT == "YOY-1") %>%
+    group_by(TANK) %>%
+    arrange(SEX) %>%
+    select(SAMPLE_ID, SEX, TANK),
+  caption = "Table 1a: Adults in spawning tanks contributing to spawning event 1 (YOY1)."
+)
+
+
+# YOY2
+kable(
+  adults %>%
+    filter(SPAWNING_EVENT == "YOY-2") %>%
+    group_by(TANK) %>%
+    arrange(SEX) %>%
+    select(SAMPLE_ID, SEX, TANK),
+  caption = "Table 1b: Adults in spawning tanks contributing to spawning event 1 (YOY1)."
+)
+
+
+# YOY3
+kable(
+  adults %>%
+    filter(SPAWNING_EVENT == "YOY-3") %>%
+    group_by(TANK) %>%
+    arrange(SEX) %>%
+    select(SAMPLE_ID, SEX, TANK),
+  caption = "Table 1c: Adults in spawning tanks contributing to spawning event 1 (YOY1)."
+)
+
+```
+
+Grow-out ponds were sampled in 2017 (N = 1) and 2018 (N = 2) at the TPWD hatchery in Corpus Christi, TX at three time points using a dip net, approx. 10 days after stocking, midway through growout, and as fingerlings were removed from the grow-out ponds to stock in local bays. When possible, ponds are stocked with larvae from a single incubator with varied egg sources (spawning tanks) within a spawning room. Spawning tanks contain three females and two males each and breeders are rotated among tanks within a room on a yearly schedule. After a spawning event occurs in a tank, eggs are collected and transfered to an incubator for volumentric enumeration. Eggs are then stocked into 100 gallon tanks on a flow through with no more than 1.2 million larvae per incubator. If adults from more than one tank spawn at the same time, incubators will contain eggs from more than one spawning tank. After two days in the incubator room, larvae are stocked into grow-out ponds at a rate of 400,000 larvae per acre. 
+
+
+```{r fig.cap="Figure 1: Distribution of length, weight, and season breeders were placed in spawning room for all three spawning events.", fig.width=10, fig.height=5}
+
+LH <- adults %>%
+  select(-SEX, -TANK) %>%
+  gather(key = STAT, value = VALUE, 2:4)
+
+ggplot(LH, aes(x = VALUE)) +
+  geom_histogram(color = "black", fill = "darkorange") +
+  facet_grid(SPAWNING_EVENT ~ STAT, scales = "free") +
+  labs(x = "", "number of adults") +
+  theme_facet
+
+```
+
+
+# Parentage & Sibship reconstruction
+
+## Format data set for parentage assignment
+
+**Genotypes**
+
+```{r}
+
+# read data in 012 format
+ind <- read_delim("data/ASSIGNMENT/SOCminDP10.genotyped.ind", delim = "\t", col_names = "LIB_ID") %>%
+  separate(LIB_ID, into = c("SP", "LIB", "SAMPLE_ID"), 
+           sep = "_", extra = "merge", remove = FALSE) %>%
+  select(SAMPLE_ID) 
+
+geno <- read_delim("data/ASSIGNMENT/SOCminDP10.F12.012", delim = "\t", 
+                   col_names = FALSE) %>%
+  bind_cols(ind) %>%
+  column_to_rownames("SAMPLE_ID") %>%
+  select(-X1)
+
+
+# convert to matrix
+geno <- as.matrix(geno)
+
+# change missing data to -9
+geno[geno == -1] <- -9
+
+# check format
+CheckGeno(geno)
+
+```
+
+A minimum of 500 - 800 reliably scored (low genotyping error), independent, and informative loci (high MAF and genotyping call rate) are needed for full pedigree reconstruction.
+
+Data set contains `r ncol(geno)` loci with
+
+* Locus quality > 20
+* Genotype quality > 30
+* Minimum depth per genotype: 10 reads
+* Minimum mean depth: 20
+* Genotype call rate per locus: > 90%
+* Minor allele frequency: 1%
+* Only biallelic SNPs retained
+
+Duplicate individuals and homozygote/heterozygote calls were used to assess for genotyping error. For SNP pairs with high linkage disequilibrium (r2 > 0.5) one SNP was removed from data set. Genotypes with < 50% will be excluded from parentage assignment.
+
+
+**Sample Information**
+
+```{r}
+
+adults <- read_delim("data/ASSIGNMENT/Adult_info.txt", delim = "\t") %>%
+  select(SAMPLE_ID, SEX) %>%
+  distinct
+
+LH <- read_delim("data/ASSIGNMENT/SOCminDP10.genotyped.ind", delim = "\t", col_names = "LIB_ID") %>%
+  separate(LIB_ID, into = c("SP", "LIB", "SAMPLE_ID"), 
+           sep = "_", extra = "merge", remove = FALSE) %>%
+  separate(SAMPLE_ID, into = c("GRP", "tmp"), 
+           sep = "_", remove = FALSE) %>%
+  mutate(BIRTH_YEAR = case_when(GRP == "ADULT" ~ 2010,
+                                GRP %in% c("YOY-1", "YOY1") ~ 2017,
+                                GRP %in% c("YOY-2", "YOY-3") ~ 2018)) %>%
+  left_join(adults) %>%
+  mutate(SEX = case_when(SEX == "M" ~ 2,
+                         SEX == "F" ~ 1,
+                         SEX == "U" ~ 3, 
+                         is.na(SEX) ~ 3)) %>%
+  select(SAMPLE_ID, SEX, BIRTH_YEAR) %>%
+  as.data.frame()
+
+SampleInfo <- read_delim("data/ASSIGNMENT/SampleInfo.txt", delim = "\t")
+
+imiss <- read_delim("data/VCF/SOC.F12.imiss", delim = "\t") %>%
+  separate(INDV, into = c("SOC", "LIB", "WELL", "SAMPLE_ID"), 
+           delim = "\t", extra = "merge", remove = FALSE) %>%
+  rename(LIB_ID = INDV)
+
+```
+
+Sample information with sex and birth year is used for assigning parents and other relatives. All genotyped potential parents have birth year arbitrarily set to 2010 (before birth year of progeny to indicate which are parents and which are offspring), progeny have birth years set to 2017 and 2018 according to spawning event.
+
+
+## Parentage assignment is accomplished using set of increasingly stringent filters
+
+Parentage assignment performed using `sequoia` [@Huisman2017].
+
+* **Opposing homozygotes:** number of SNPs at which the pair are opposing homozygotes < genotyping error x N(SNPs) + safety margin (allowed mismatches). This step functions as the initial parentage assignment step and removes unlikely pairs
+* **likelihood ratio parent-offspring vs unrelated:** Parentage assignment occurs by when LLR > `Tfilter` (set threshold value).
+* **likelihood ratio parent-offspring vs other relationship:** Sibship reconstruction occurs when LLR > `Tassign` (set threshold value) to distinguish between siblings, grandparents, aunts/uncles vs parents.
+* **age differences:** Final step to determine which individual is the adult and which is the offspring based on which individual is older.
+
+## Sibship clustering accomplished using iterative approach
+
+Full pedigree reconstruction includes sibship clustering among individuals w/out two genotyped parents and occurs over several rounds to first assign highly likely relationships, then, in later rounds additional steps are added to iteratively add to the pedigree instead of using MCMC to explore many different pedigree possibilities. 
+
+Each round consist of the following steps, after initial parentage assignment step based on opposing homozygotes and filtering steps described above for parentage assignment and different LLRs.
+
+* Identify pairs of full/half-siblings
+* Cluster siblings into sibships
+* *Starting round 3:* Identify grandparent-offspring
+* Merge existing sibships
+* *Starting round 2:* Replace dummy parents with genotyped individuals
+* *Starting round 2:* Add lone indv to sibships
+* Assign genotyped parents to genotyped individuals
+* *Starting round 2:* Assign grandparents (dummy/genotyped) to sibships
+
+Total likelihood usually converges over 5 - 10 iterations; parental likelihood ratios (LLRs) are calculated after each round for each individual along with likelihood for all possible relationships with assigned parent (ratio of likelihood parent-offspring vs most likely alternative).
+
+## Run pedigree reconstruction
+
+```{r cache=TRUE, include=TRUE}
+
+parentage <- sequoia(GenoM = geno, 
+                     LifeHistData = LH,
+                     MaxSibIter = 10, 
+                     Err = 0.02, 
+                     MaxMismatch = 10,
+                     MaxSibshipSize = 1000,
+                     Tassign = 0.5,
+                     Tfilter = -2,
+                     )
+
+pedigree <- parentage$Pedigree %>%
+  rename(SAMPLE_ID = id) %>%
+  left_join(SampleInfo) %>%
+  filter(!GRP == "ADULT")
+
+```
+
+
+\marginnote[Parameters used for pedigree reconstruction.]
+
+* Assumed genotyping error rate = 0.02.
+* Safety margin for allowed number of opposite homozygotes = 10
+* Maximum number iterations for full pedigree reconstruction) = 10
+* Threshold log10-likelihood ratio (LLR) required for acceptance of proposed relationship relative to next most likely relationsship = 0.5 (default).
+* Threshold LLR between proposed relationship vs unrelated, to select candidate relatives = -2 (default).
+
+
+# Assess quality of pedigree reconstruction
+
+## Assess prevalance of Mendelian errors
+
+```{r fig.cap="Figure 2: Relationships of allele frequency (AF), missingness and Mendelian errors per SNP.", fig.height=8, fig.width=8}
+
+ped <- parentage$Pedigree %>%
+  select(1:3)
+
+snpCheck <- SnpStats(GenoM = geno,
+                     Ped = ped)
+
+```
+
+SNPs with minor allele frequency < 0.01 and genotype call rate < 90% were removed from data set prior to pedigree reconstruction. Error count includes both number of parent-offspring pairs that are opposing homozygotes (parent AA, offspring aa) and Mendelian errors (parents AA and aa but offspring not Aa).
+
+```{r fig.cap="Figure 3: Genotyping error assessed based on Mendelian errors (parents AA and aa but offspring not Aa); red dashed line indicates maximum genotyping error.", fig.height=4, fig.width=9}
+
+err <- as.data.frame(snpCheck) %>%
+  mutate(geno_err = ER/sum(ER))
+
+ggplot(err, aes(x = geno_err)) +
+  geom_histogram(binwidth = 0.0005, color = "black", fill = "darkorange") +
+  geom_vline(aes(xintercept = max(geno_err)), color = "darkred", linetype = "dashed") +
+  scale_x_continuous(limits = c(0, 0.015)) +
+  scale_y_sqrt() +
+  labs(x = "genotyping error as proportion of total loci", y = "number of loci") +
+  theme_standard
+
+```
+
+Genotyping error rate was assessed prior to pedigree reconstruction by comparing duplicate genotypes (< 5%) and assessing pattens of homozygote/heterozygotes using `whoa` method (mean genotyping error = 0.0000899), though genotyping error rate is difficult to assess using number of Mendelian errors (mean across all loci `r mean(err$geno_err)`) as errors may go undetected and some individuals may be disproportionally affected. 
+
+```{r fig.cap="Figure 4: Frequency of opposing homozygotes between offspring and assigned parents (parent AA, offspring aa); red dashed line indicates maximum genotyping error.", fig.height=4, fig.width=6}
+
+loc_total <- ncol(geno)
+
+OH <- pedigree %>%
+  mutate(dam = OHdam/loc_total,
+         sire = OHsire/loc_total) %>%
+  select(SAMPLE_ID, dam, sire) %>%
+  gather(key = PARENT, value = FreqOppHomozygotes, 2:3)
+
+ggplot(OH, aes(x = FreqOppHomozygotes)) +
+  geom_histogram(binwidth = 0.001, color = "black", fill = "darkorange") +
+  labs(x = "opposing homozygotes (proportion of total loci)", y = "number of loci") +
+  theme_standard
+
+```
+
+The number of loci at which parents and offspring are opposite homozygotes should be small to zero.
+
+High error rate may bias pedigree reconstruction, with successful assignment being biased toward parents with low genotyping error.
+
+
+## Quality of pedigree reconstruction
+
+LLR for parent-offspring is likelihood ratio parent-offspring vs unrelated and should be negative. The LLR for parent pairs calculated after parentage assignment and pedigree reconstruction and is therefore conditional on all other links in reconstructred pedigree. It should always be positive, though some small/negative values may occur, especially for full-sibs and dummy-dummy matches.
+
+```{r fig.cap="Figure 5: Distribution of LLR of parents and parent pair.", fig.height=4, fig.width=9}
+
+LLR <- pedigree %>%
+  select(SAMPLE_ID, LLRdam, LLRsire, LLRpair) %>%
+  gather(key = CATEGORY, value = LRR, 2:4) %>%
+  mutate(CATEGORY = ordered(CATEGORY, levels = c("LLRpair", "LLRdam", "LLRsire")))
+
+ggplot(LLR, aes(x = LRR)) +
+  geom_histogram(color = "black", fill = "darkorange") +
+  facet_grid(. ~ CATEGORY, scales = "free") +
+  theme_standard
+
+```
+
+
+## Likelihood of pedigree
+
+Total likelihood of the pedigree is the probability of observing the genotype data given the reconstructed pedigree, allele frq, and genotyping error rate. Value at intiation calculated assuming HWE, subsequent values at end of each iteration should increase & asymptote. Number of iterations should be increase if asymptote is not apparent.
+
+```{r fig.cap="Figure 6: Total likelihood of pedigree for each iteration during pedigree reconstruction.", fig.height=4, fig.width=5}
+
+LH <- as.data.frame(parentage$TotLikSib) %>%
+  rename(likelihood = `parentage$TotLikSib`) %>%
+  rownames_to_column("iteration") %>%
+  mutate(pedigree = "sibships",
+         iteration = as.numeric(iteration))
+
+ggplot(LH, aes(x = iteration, y = likelihood, group = pedigree)) +
+  geom_line() +
+  geom_point(shape = 21, size = 2, color = "black", fill = "darkorange") +
+  labs(x = "iteration", y = "total likelihood perigree") +
+  theme_standard
+
+
+```
+
+
+## Potential duplicate genotypes
+
+```{r}
+
+dups <- parentage$DupGenotype
+
+kable(
+  dups %>%
+    select(ID1, ID2, Mismatch),
+  caption = "Table 2: Pairs of individuals flagged as potential duplicates."
+)
+
+pedigree <- pedigree %>%
+  filter(!SAMPLE_ID %in% dups$ID1)
+
+```
+
+May include closely related individuals and monozygotic twins. Here, all pairs are from same sampling point and could be library prep errors. Remove one individual per pair from parentage assignment.
+
+## Non-sampled adult genotypes (dummy individuals)
+
+`sequoia` will introduce dummy individuals for unsampled parents, i.e. they are assigned to groups of siblings.
+
+```{r}
+
+dummyIDs <- parentage$DummyIDs
+
+kable(
+  dummyIDs %>%
+    select(id, NumOff),
+  caption = "Table 3: Number of offspring assigned to dummy individuals."
+)
+
+# quality check offspring assigned to F1
+F0001 <- dummyIDs %>%
+  filter(id == "F0001") %>%
+  select(id, 12:13) %>%
+  gather(key = YOY, value = SAMPLE_ID, 2:3) %>%
+  left_join(imiss) %>%
+  select(id, SAMPLE_ID, F_MISS) %>%
+  filter(!is.na(SAMPLE_ID))
+  
+M0001 <- dummyIDs %>%
+  filter(id == "M0001") %>%
+  select(id, 12:13) %>%
+  gather(key = YOY, value = SAMPLE_ID, 2:3) %>%
+  left_join(imiss) %>%
+  select(id, SAMPLE_ID, F_MISS) %>%
+  filter(!is.na(SAMPLE_ID))
+  
+M0002 <- dummyIDs %>%
+  filter(id == "M0002") %>%
+  select(id, 12:13) %>%
+  gather(key = YOY, value = SAMPLE_ID, 2:3) %>%
+  left_join(imiss) %>%
+  select(id, SAMPLE_ID, F_MISS) %>%
+  filter(!is.na(SAMPLE_ID))
+
+```
+
+It is possible that low quality genotypes for progeny in the data set result in them appearing to be siblings as technical artifacts (e.g. high proportion of missing data or excess heterozygosity).
+
+```{r}
+
+# female 1
+kable(F0001,
+      caption = "Table 4a: Individuals assigned to dummy female 1.")
+
+
+# male 2
+kable(M0001,
+      caption = "Table 4b: Individuals assigned to dummy male 2.")
+
+
+# male 3
+kable(M0002,
+      caption = "Table 4c: Individuals assigned to dummy male 2.")
+  
+```
+
+Adult 777 and 5081 are assigned as siblings with same mother and father.
+
+## Assess progeny that do not have unambiguously assigned parents
+
+```{r}
+
+Fis <- read_delim("data/VCF/SOC.F12.het", delim = "\t") %>%
+  rename(LIB_ID = INDV) 
+
+lq <- pedigree %>%
+  filter(is.na(dam) | is.na(sire) | sire == "M0002") %>%
+  left_join(imiss) %>%
+  left_join(Fis) %>%
+  select(SAMPLE_ID, dam, sire, GRP, SAMPLE_POINT, F_MISS, `F`)
+
+kable(
+  lq %>%
+    distinct(SAMPLE_ID, .keep_all = TRUE),
+  caption = "Table 5: Missing data and Fis value (individual heterozygosity) for progeny w/out both parents assigned."
+)
+
+pedigree <- pedigree %>%
+  filter(!SAMPLE_ID %in% c(lq$SAMPLE_ID))
+
+```
+
+Progeny w/out two parents unambiguously assigned to exhibit excess heterozygosity which can be an indicator of contamination. Remove genotypes from data set. This includes the two samples assigned to dummy male M0002.
+
+## Identify low quality parentage assignments
+
+```{r}
+
+lq <- pedigree %>%
+  filter(LLRpair < -10)
+
+kable(
+  lq %>%
+    select(-GRP, -SAMPLE_POINT),
+  caption = "Table 6: Progeny with excessively low LLRpair (< -10)."
+)
+
+pedigree <- pedigree %>%
+  filter(LLRpair > -10)
+
+write_delim(pedigree, "results/YOY.pedigree", delim = "\t")
+
+```
+
+## Progeny with 'impossible' parents
+
+The breeders in each tank contributing to a given spawning event are known. Progeny with parents assigned from tanks that did not participate in a spawning event should be removed (possibly error during sampling/library prep).
+
+```{r}
+
+progeny <- c("YOY-3_T3-016", "YOY-3_T2-015", "YOY-3_T2-031", "YOY-3_T2-101")
+
+pedigree <- pedigree %>%
+  filter(!SAMPLE_ID %in% progeny)
+
+write_delim(pedigree, "results/YOY.pedigree", delim = "\t")
+
+```
+
+
+# Final pedigree
+
+Final pedigree consists of `r nrow(pedigree)` progeny unambiguously assigned to `r length(unique(pedigree$dam))` different female and `r length(unique(pedigree$sire))` different male breeders.
+
+```{r}
+
+kable(
+  pedigree %>%
+    select(SAMPLE_ID, dam, sire, GRP, SAMPLE_POINT) %>%
+    group_by(GRP) %>%
+    arrange(SAMPLE_POINT),
+  caption = "Table 7: Pedigree for three spawning events at three different time points."
+)
+
+```
+

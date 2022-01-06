@@ -1,0 +1,1882 @@
+---
+title: "Identify genomic component associated with environmental parameters of grow-out ponds"
+subtitle: "Comparison of reproductive success in red drum hatchery adults"
+author: "SJ O'Leary"
+date: "`r Sys.Date()`"
+output: tint::tintHtml
+bibliography: SOC.bib
+link-citations: yes
+editor_options: 
+  chunk_output_type: console
+---
+
+
+```{r setup, include=FALSE}
+
+
+# load libraries and functions ====
+
+# load libraries
+library(tufte)
+library(tint)
+library(knitr)
+library(glue)
+library(lfmm)
+library(vcfR)
+library(vegan)
+library(ggrepel)
+source("scr/libraries.R")
+
+# load functions
+source("scr/ggplot.R")
+source("scr/xtrafunctions.R")
+source("scr/genind.R")
+source("scr/PCA.R")
+source("scr/vegan.R")
+
+# OTHER OPTIONS ====
+
+# set how numbers are printed
+options(scipen=999)
+
+# invalidate cache when the package version changes
+knitr::opts_chunk$set(
+	message = FALSE,
+	warning = FALSE,
+	cache.extra = packageVersion("tint"),
+	tidy = FALSE,
+	echo = FALSE
+)
+
+options(htmltools.dir.version = FALSE)
+
+
+# COLOR SCHEMES ----
+col_events <- c("#4473c4", "#3d6623", "#c00000")
+
+col_tanks <- c("darkorange", "#72b844", "gold", "#7008A0")
+  
+col_nine <- c("#44546a", "#7008a0", "#ed7d31", 
+              "#ffbf00", "#4473c4", "#70ad47", 
+              "#c00000",  "#375623", "#5b9bd5")  
+
+```
+
+^[This is a sidenote that was entered using a footnote.]
+
+Redundancy analysis is a constrained ordination method that can be used to determine the extent to which one set of variables (explanatory variables) explains the variation in another set of variables (response variables), i.e. it is the multivariate analog of a simple linear regression [@Oksanen2010]. It assumes that the relationship between the dependent (response) and independent (explanatory) variables is linear. Here, it can be applied to understand which environmental parameters of the grow-out pond significantly explain a component of the observed pattern of genetic variation of progeny [@Forester2016; @Forester2018].
+
+A partial RDA enables examining the effect of a set of variables (explanatory variables, X) on a response matrix (Y) while controlling for a set of conditioning variables (Z) and can be applied in a case such as here where the strong effect of a set of well-characterized variables (parentage/family) might obscure the signal of a second set of variables (environmental conditions).
+
+# Prepare data sets
+
+## Response variables (genotypes)
+
+Thin SNPs so only one SNP per contig is retained to reduce linkage among markers.
+
+```{bash eval=FALSE, echo=TRUE}
+
+# thin SNPs within 350 bp of each other
+vcftools --vcf data/GENOME_SCAN/SOC.yoy.genotyped.recode.vcf --out data/GENOME_SCAN/SOC.yoy.thinned --thin 350 --recode --recode-INFO-all
+
+```
+
+Format response variables (genetic data) as allele counts per locus and individual, homozygous genotypes are coded as 0 or 2, heterozygotes as 1. 
+
+RDA requires a complete data set, therefore missing values are replaced with the mean allele frequency. 
+
+```{r}
+
+# import vcf
+vcf <- read.vcfR("data/GENOME_SCAN/SOC.yoy.thinned.recode.vcf", verbose = FALSE)
+
+# convert to genind object
+gen <- vcfR2genind(vcf)
+
+rm_indv <- c("Soc_1a-E01_YOY1_T2-011", "Soc_1b-G07_YOY1_T3-040",
+             "Soc_2a-E01_YOY1_T2-061", "Soc_2a-E03_YOY1_T2-063",
+             "Soc_2a-G07_YOY1_T3-056", "Soc_2b-A12_YOY1_T1-087",
+             "Soc_3a-G01_YOY-2_T1-113", "Soc_3a-H07_YOY-2_T3-063",
+             "Soc_3b-D08_YOY-2_T3-132", "Soc_3c-C09_YOY-2_T3-121",
+             "Soc_4b-D04_YOY-3_T3-016", "Soc_4b-E03_YOY-3_T2-015",
+             "Soc_4c-B10_YOY-3_T1-058", "Soc_4c-C07_YOY-3_T2-031",
+             "Soc_5a-A09_YOY-3_T3-109", "Soc_5a-A11_YOY-3_T3-111",
+             "Soc_5a-B10_YOY-3_T1-070", "Soc_5b-F04_YOY-3_T3-052",
+             "Soc_5c-C05_YOY-3_T2-101", "Soc_X2a-A08_YOY-2_T1-052")
+
+gen <- gen.ind.rem.Ind(gen, rm_indv)
+
+# replace missing data
+nomissing <- missingno(gen, type = "mean")
+
+# extract allele counts keep only one allele 
+allelecount <- as.data.frame(tab(nomissing)) %>%
+  t() %>%
+  as.data.frame() %>%
+  rownames_to_column("ALLELE") %>%
+  separate(ALLELE, into = c("LOC", "NO"), sep = -2) %>%
+  filter(NO == ".0") %>%
+  select(-NO) %>%
+  column_to_rownames("LOC") %>%
+  t() %>%
+  as.data.frame()
+
+```
+
+The response variables consist of `r ncol(allelecount)` loci genotyped for `r nrow(allelecount)` progeny across three spawning events (three sample points per spawning event).
+
+
+## Conditioning variables: Family
+
+Parentage (dam + sire) of each offspring creates the dominant signal in the data set. Because categorical data cannot be used, parentage will be converted into "dummy variables", i.e. we will create a matrix with each row corresponding to a single progeny and on column per potential parent. Parents will be coded as 1 non-parental adults as 0.
+
+```{r}
+
+# read pedigree
+pedigree <- read_delim("results/YOY.pedigree", "\t") %>%
+  unite(FAM, dam, sire, sep = "_", remove = FALSE)
+
+tmp <- pedigree %>%
+  select(SAMPLE_ID, dam, sire) %>%
+  gather(key = parent, value = adult, 2:3) %>%
+  mutate(parent = 1) %>%
+  spread(key = adult, value = parent) %>%
+  replace(is.na(.), 0)
+
+# ensure that family matrix is in the same sequence as genetic matrix
+fam <- as.data.frame(indNames(gen)) %>%
+  rename(LIB_ID = `indNames(gen)`) %>%
+  separate(LIB_ID, into = c("SP", "WELL", "SAMPLE_ID"), 
+           sep = "_", extra = "merge", remove = FALSE) %>%
+  select(SAMPLE_ID) %>%
+  left_join(tmp) %>%
+  select(-SAMPLE_ID)
+
+```
+
+
+## Explanatory variables: Environmental data of grow-out ponds
+
+The spawning events took place in 2017 (N = 1) and 2018 (N = 2). Grow-out ponds exclude predators and ensure abundant prey and while physical parameters (temperature, dissolved oxygen, pH, and salinity) are monitored, they are not controlled with the exception of dissolved oxygen which is maintained by an active water paddle which can be manipulated.
+
+```{r}
+
+kable(
+  read_delim("data/GENOME_SCAN/indv_stocked.txt", delim = "\t") %>%
+    rename(EVENT = SPAWNING_EVENT),
+  caption = "Table 1: Number of individuals at different stages (incubator, stocking into grow-out ponds, harvest) and comparison of survival in incubator and grow-out pond."
+)
+
+```
+
+The number of eggs placed in the incubator is largely consistent across spawning events 1 and 3 (approx. 1 Mill). By contrast, for spawning event 2 only approximate 690,000 were placed in the incubator; despite though the number of brood fish involved in the spawning event 2 being the highest (individuals from 4 tanks compared to 2 and 3). 
+
+Though fry were stocked into the grow-out ponds at similar levels (375,000 - 428,000) the proprtion of progeny that survived to be harvested for stocking varied greatly from 7% (spawning event 3), to 28% spawning event 1, and 91% (spawning event 2). By contrast, survival during the time in the incubator was largely consistent (52 - 60%). 
+
+Despite spawning event 2 having the lowest number of eggs incubated, due to the highest proportion of progeny surviving to the next stage both in the incubator and the grow-out pond it had the highest number of progeny harvested for stocking at 343,000 compared to 111,000 and 30,000 for spawning event 1 and 3, respectively. This could be due to differences in environmental conditions of the pond or due to the fact that this pond was harvested early due to construction.
+
+```{r fig.cap="Fig 1: Change in length [mm] of progreny over time spend in grow-out pond for each spawning event.", fig.width=6, fig.height=5}
+
+library(ggpmisc)
+
+growth <- read_delim("data/GENOME_SCAN/growth_ponds.txt", delim = "\t")
+
+# set formula for regression
+my.formula <- y ~ x
+
+ggplot(growth, aes(x = DAY, y = LENGTH, 
+                   fill = SPAWNING_EVENT, color = SPAWNING_EVENT, group = SPAWNING_EVENT)) +
+  geom_smooth(method = "lm", color = "black", se = FALSE, formula = my.formula) +
+  geom_point(shape = 21, size = 3, color = "black") +
+  stat_poly_eq(formula = my.formula, 
+               aes(label = paste(..rr.label.., sep = "~~~")), 
+               parse = TRUE) +
+  scale_fill_manual(values = col_events) +
+  scale_color_manual(values = col_events) +
+  labs(x = "day in pond", y = "length [mm]") +
+  theme_standard
+
+# YOY-1
+tmp <- growth %>%
+  filter(SPAWNING_EVENT == "YOY-1")
+
+writeLines("\n linear regression growth YOY-1")
+g <- lm(LENGTH ~ DAY, data = tmp)
+
+summary(g)
+
+writeLines(glue("slope (growth) for spawning event 1: {round(g$coefficients[[2]], digits = 2)}"))
+
+
+# YOY-2
+tmp <- growth %>%
+  filter(SPAWNING_EVENT == "YOY-2")
+
+writeLines("\n linear regression growth YOY-2")
+g <- lm(LENGTH ~ DAY, data = tmp)
+
+summary(g)
+
+writeLines(glue("slope (growth) for spawning event 2: {round(g$coefficients[[2]], digits = 2)}"))
+
+
+# YOY-3
+tmp <- growth %>%
+  filter(SPAWNING_EVENT == "YOY-3")
+
+writeLines("\n linear regression growth YOY-3")
+g <- lm(LENGTH ~ DAY, data = tmp)
+
+summary(g)
+
+writeLines(glue("slope (growth) for spawning event 3: {round(g$coefficients[2], digits = 2)}"))
+
+```
+
+Linear regressions show a similar slope for spawning event 1 and 2 (0.3 and 0.34), while the slope for spawning event three is lower (0.1); indicating slowest growth. Generally, fish are expected to spend approximately 30 days in a pond and be about 3 cm when harvested, though growth rates may differ among ponds, especially due to differences in temperature. 
+
+Fish were harvested from grow-out pond 2 at a shorter size (approx 1.5 cm) than usually desired (2.5 - 3 cm) due to construction. Due to slow, growth fish from pond 3 were also harvested at a smaller age and spent the most amount of time in the grow-out ponds (> 50).
+
+```{r fig.cap="Fig 2a: Change of physical parameters (temperature, dissolved oxygen, pH, and salinity) measured in each grow-out pond during culture for spawning event 1. Dashed vertical lines indicate sample points T1, T2, and T3. Dissolved oxygen and temperature are measures three times a day, in the morning (blue), afternoon (red), and evening (green).", fig.width=9, fig.height=12}
+
+# import physical parameters
+yoy1 <- read_delim("data/GENOME_SCAN/YOY1.env", delim = "\t") %>%
+  select(-X12)
+
+p1 <- ggplot(yoy1, aes(x = DAY)) +
+  geom_line(aes(y = TEMP_MORN), color = "darkblue", size = 1) +
+  geom_line(aes(y = TEMP_AFTERN), color = "darkred", size = 1) +
+  geom_line(aes(y = TEMP_EVEN), color = "darkgreen", size = 1) +
+  geom_vline(xintercept = c(11, 21, 36), color = "black", linetype = "dashed") +
+  labs(x = "day in pond", y = "Temperature [C]") +
+  theme_standard
+
+p2 <- ggplot(yoy1, aes(x = DAY)) +
+  geom_line(aes(y = DO_MORN), color = "darkblue", size = 1) +
+  geom_line(aes(y = DO_AFTERN), color = "darkred", size = 1) +
+  geom_line(aes(y = DO_EVEN), color = "darkgreen", size = 1) +
+  geom_vline(xintercept = c(11, 21, 36), color = "black", linetype = "dashed") +
+  labs(x = "day in pond", y = "Dissolved Oxygen") +
+  theme_standard
+
+p3 <- ggplot(yoy1, aes(x = DAY)) +
+  geom_line(aes(y = SALINITY), color = "darkblue", size = 1) +
+  geom_vline(xintercept = c(11, 21, 36), color = "black", linetype = "dashed") +
+  labs(x = "day in pond", y = "Salinity") +
+  theme_standard
+
+p4 <- ggplot(yoy1, aes(x = DAY)) +
+  geom_line(aes(y = PH), color = "darkblue", size = 1) +
+  geom_vline(xintercept = c(11, 21, 36), color = "black", linetype = "dashed") +
+  labs(x = "day in pond", y = "pH") +
+  theme_standard
+
+multiplot(p1, p2, p3, p4, cols = 1)
+
+```
+
+Pond culture for spawning event 3 is characterized by a decrease in temperature between sampling point T1 and T2 which then increases again to experience a second more steep (but not as drastic) decline.
+
+```{r fig.cap="Fig 2b: Change of physical parameters (temperature, dissolved oxygen, pH, and salinity) measured in each grow-out pond during culture for spawning event 2. Dashed vertical lines indicate sample points T1, T2, and T3. Dissolved oxygen and temperature are measures three times a day, in the morning (blue), afternoon (red), and evening (green).", fig.width=9, fig.height=12}
+
+# import physical parameters
+yoy2 <- read_delim("data/GENOME_SCAN/YOY2.env", delim = "\t")
+
+p1 <- ggplot(yoy2, aes(x = DAY)) +
+  geom_line(aes(y = TEMP_MORN), color = "darkblue", size = 1) +
+  geom_line(aes(y = TEMP_AFTERN), color = "darkred", size = 1) +
+  geom_line(aes(y = TEMP_EVEN), color = "darkgreen", size = 1) +
+  geom_vline(xintercept = c(14, 24, 47), color = "black", linetype = "dashed") +
+  labs(x = "day in pond", y = "Temperature [C]") +
+  theme_standard
+
+p2 <- ggplot(yoy2, aes(x = DAY)) +
+  geom_line(aes(y = DO_MORN), color = "darkblue", size = 1) +
+  geom_line(aes(y = DO_AFTERN), color = "darkred", size = 1) +
+  geom_line(aes(y = DO_EVEN), color = "darkgreen", size = 1) +
+  geom_vline(xintercept = c(14, 24, 47), color = "black", linetype = "dashed") +
+  labs(x = "day in pond", y = "Dissolved Oxygen") +
+  theme_standard
+
+p3 <- ggplot(yoy2, aes(x = DAY)) +
+  geom_line(aes(y = SALINITY), color = "darkblue", size = 1) +
+  geom_vline(xintercept = c(14, 24, 47), color = "black", linetype = "dashed") +
+  labs(x = "day in pond", y = "Salinity") +
+  theme_standard
+
+p4 <- ggplot(yoy2, aes(x = DAY)) +
+  geom_line(aes(y = PH), color = "darkblue", size = 1) +
+  geom_vline(xintercept = c(14, 24, 47), color = "black", linetype = "dashed") +
+  labs(x = "day in pond", y = "pH") +
+  theme_standard
+
+multiplot(p1, p2, p3, p4, cols = 1)
+
+```
+
+Spawning event 2 has comparatively lower salinity overall and experiences a steep decline in temperature after sampling point T2 after which there is a slow, steady increase in temperature.
+
+```{r fig.cap="Fig 2c: Change of physical parameters (temperature, dissolved oxygen, pH, and salinity) measured in each grow-out pond during culture for spawning event 3. Dashed vertical lines indicate sample points T1, T2, and T3. Dissolved oxygen and temperature are measures three times a day, in the morning (blue), afternoon (red), and evening (green).", fig.width=9, fig.height=12}
+
+# import physical parameters
+yoy3 <- read_delim("data/GENOME_SCAN/YOY3.env", delim = "\t")
+
+p1 <- ggplot(yoy3, aes(x = DAY)) +
+  geom_line(aes(y = TEMP_MORN), color = "darkblue", size = 1) +
+  geom_line(aes(y = TEMP_AFTERN), color = "darkred", size = 1) +
+  geom_line(aes(y = TEMP_EVEN), color = "darkgreen", size = 1) +
+  geom_vline(xintercept = c(13, 25, 63), color = "black", linetype = "dashed") +
+  labs(x = "day in pond", y = "Temperature [C]") +
+  theme_standard
+
+p2 <- ggplot(yoy3, aes(x = DAY)) +
+  geom_line(aes(y = DO_MORN), color = "darkblue", size = 1) +
+  geom_line(aes(y = DO_AFTERN), color = "darkred", size = 1) +
+  geom_line(aes(y = DO_EVEN), color = "darkgreen", size = 1) +
+  geom_vline(xintercept = c(14, 24, 47), color = "black", linetype = "dashed") +
+  labs(x = "day in pond", y = "Dissolved Oxygen") +
+  theme_standard
+
+p3 <- ggplot(yoy3, aes(x = DAY)) +
+  geom_line(aes(y = SALINITY), color = "darkblue", size = 1) +
+  geom_vline(xintercept = c(14, 24, 47), color = "black", linetype = "dashed") +
+  labs(x = "day in pond", y = "Salinity") +
+  theme_standard
+
+p4 <- ggplot(yoy3, aes(x = DAY)) +
+  geom_line(aes(y = PH), color = "darkblue", size = 1) +
+  geom_vline(xintercept = c(14, 24, 47), color = "black", linetype = "dashed") +
+  labs(x = "day in pond", y = "pH") +
+  theme_standard
+
+multiplot(p1, p2, p3, p4, cols = 1)
+
+```
+
+Spawning event 3 has similarly low levels of salinity compared to spawning event 2. This pond was stocked about a week after the pond used for spawning event 2, so it experiences the same steep decline in temperature follow by a gradualt increase but then experiences a second similarly steep but even more drastic drop in temperatures after which the temperatures remain low.
+
+```{r fig.cap="Fig 3: Correlation among physical parameters (temperature, dissolved oxygen, pH, and salinity) measured in each grow-out pond (example spawning event 1).", fig.width=9, fig.height=9}
+
+yoy <- bind_rows(yoy1, yoy2, yoy3)
+
+plot <- yoy %>%
+  filter(SPAWNING_EVENT == "YOY-1")
+
+pairs(plot[4:11])
+
+```
+
+Morning, evening, and afternoon measurements of temperature are correlated. The same pattern is observed for dissolved oxygen.
+
+```{r fig.cap="Fig 4: Comparison of distribution of physical parameters in grow-out ponds of spawning events 1 (blue), 2 (green), and 3 (red)).", fig.width=8, fig.height=8.5}
+
+# plot distributions
+tmp <- yoy %>%
+  select(-DAY, -DATE) %>%
+  gather(key = PARAMETER, value = VALUE, 2:9) %>%
+  mutate(PARAMETER = ordered(PARAMETER, levels = c("TEMP_MORN", "TEMP_AFTERN", "TEMP_EVEN",
+                                                   "DO_MORN", "DO_AFTERN", "DO_EVEN",
+                                                   "SALINITY", "PH")))
+  
+ggplot(tmp, aes(x = SPAWNING_EVENT, y = VALUE, fill = SPAWNING_EVENT)) +
+  geom_boxplot() +
+  facet_wrap(~ PARAMETER, scales = "free") +
+  scale_fill_manual(values = col_events) +
+  labs(x = "spawning event", y = "value") +
+  theme_standard
+ 
+```
+
+Not all sampled progeny experienced the entire range of values, i.e. they are removed at different time points. Calculate mean values for three time ranges (day progeny are stocked to time points 1 - 3).
+
+```{r fig.cap="Fig 5: Comparison of distribution of physical parameters in grow-out ponds of spawning events 1 (blue), 2 (green), and 3 (red)).", fig.width=8, fig.height=8.5}
+
+# format physical parameters YOY-1
+yoy1 <- read_delim("data/GENOME_SCAN/YOY1.env", delim = "\t") %>%
+  select(-X12)
+
+yoy1_1 <- yoy1 %>%
+  filter(SPAWNING_EVENT == "YOY-1" & DAY %in% c(1:10)) %>%
+  mutate(RANGE = "YOY-1_1")
+
+yoy1_2 <- yoy1 %>%
+  filter(SPAWNING_EVENT == "YOY-1" & DAY %in% c(1:20)) %>%
+  mutate(RANGE = "YOY-1_2")
+
+yoy1_3 <- yoy1 %>%
+  filter(SPAWNING_EVENT == "YOY-1" & DAY %in% c(1:36)) %>%
+  mutate(RANGE = "YOY-1_3")
+
+
+# format physical parameters YOY-2
+yoy2 <- read_delim("data/GENOME_SCAN/YOY2.env", delim = "\t")
+
+yoy2_1 <- yoy2 %>%
+  filter(SPAWNING_EVENT == "YOY-2" & DAY %in% c(1:13)) %>%
+  mutate(RANGE = "YOY-2_1")
+
+yoy2_2 <- yoy2 %>%
+  filter(SPAWNING_EVENT == "YOY-2" & DAY %in% c(1:23)) %>%
+  mutate(RANGE = "YOY-2_2")
+
+yoy2_3 <- yoy2 %>%
+  filter(SPAWNING_EVENT == "YOY-2" & DAY %in% c(1:47)) %>%
+  mutate(RANGE = "YOY-2_3")
+
+
+# format physical parameters YOY-3
+yoy3 <- read_delim("data/GENOME_SCAN/YOY3.env", delim = "\t")
+
+yoy3_1 <- yoy3 %>%
+  filter(SPAWNING_EVENT == "YOY-3" & DAY %in% c(1:12)) %>%
+  mutate(RANGE = "YOY-3_1")
+
+yoy3_2 <- yoy3 %>%
+  filter(SPAWNING_EVENT == "YOY-3" & DAY %in% c(1:24)) %>%
+  mutate(RANGE = "YOY-3_2")
+
+yoy3_3 <- yoy3 %>%
+  filter(SPAWNING_EVENT == "YOY-3" & DAY %in% c(1:63)) %>%
+  mutate(RANGE = "YOY-3_3")
+
+
+# combine environmental data into single df
+yoy <- bind_rows(yoy1_1, yoy1_2, yoy1_3,
+                 yoy2_1, yoy2_2, yoy2_3, 
+                 yoy3_1, yoy3_2, yoy3_3) 
+
+# plot distributions
+tmp <- yoy %>%
+  select(RANGE, SPAWNING_EVENT, 4:11) %>%
+  gather(key = PARAMETER, value = VALUE, 3:10) %>%
+  mutate(PARAMETER = ordered(PARAMETER, levels = c("TEMP_MORN", "TEMP_AFTERN", "TEMP_EVEN",
+                                                   "DO_MORN", "DO_AFTERN", "DO_EVEN",
+                                                   "SALINITY", "PH")))
+
+ggplot(tmp, aes(x = RANGE, y = VALUE, fill = SPAWNING_EVENT)) +
+  geom_boxplot(alpha = 0.5) +
+  geom_jitter(shape = 21) +
+  facet_wrap(~ PARAMETER, scales = "free") +
+  scale_fill_manual(values = col_events) +
+  labs(x = "spawning event", y = "value") +
+  theme_facet +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+```
+
+Test for significant differences among physical parameters of grow-out ponds for each time range per spawning event.
+
+
+**Temperature (morning)**
+
+```{r}
+
+# anova
+anova <- aov(TEMP_MORN~RANGE, data = yoy)
+
+writeLines("\n RESULTS ANOVA")
+summary(anova)
+
+```
+
+Global comparison is significant, test for pairwise comparisons among time ranges across spawning events.
+
+```{r}
+
+# Tukey
+tukey <- TukeyHSD(anova)
+
+kable(
+  as.data.frame(tukey$RANGE) %>%
+    rownames_to_column("tmp") %>%
+    separate(tmp, into = c("RANGE1", "RANGE2"), sep = 8) %>%
+    mutate(RANGE1 = str_sub(RANGE1, end = -2),
+           `p adj` = round(`p adj`, digits = 3)) %>%
+    filter(`p adj` <= 0.05) %>%
+    select(-lwr, -upr) %>%
+    arrange(RANGE1, RANGE2),
+  caption = "Table 2a: Significant pairwise comparisons of morning temperature using Tukey-Honest Significanct Differences test."
+)
+
+```
+
+**Temperature (afternoon)**
+
+```{r}
+
+# anova
+anova <- aov(TEMP_AFTERN~RANGE, data = yoy)
+
+writeLines("\n RESULTS ANOVA")
+summary(anova)
+
+```
+
+Global comparison is significant, test for pairwise comparisons among time ranges across spawning events.
+
+```{r}
+
+# Tukey
+tukey <- TukeyHSD(anova)
+
+kable(
+  as.data.frame(tukey$RANGE) %>%
+    rownames_to_column("tmp") %>%
+    separate(tmp, into = c("RANGE1", "RANGE2"), sep = 8) %>%
+    mutate(RANGE1 = str_sub(RANGE1, end = -2),
+           `p adj` = round(`p adj`, digits = 3)) %>%
+    filter(`p adj` <= 0.05) %>%
+    select(-lwr, -upr) %>%
+    arrange(RANGE1, RANGE2),
+  caption = "Table 2b: Significant pairwise comparisons of afternoon temperature using Tukey-Honest Significanct Differences test."
+)
+
+```
+
+**Temperature (evening)**
+
+```{r}
+
+# anova
+anova <- aov(TEMP_EVEN~RANGE, data = yoy)
+
+writeLines("\n RESULTS ANOVA")
+summary(anova)
+
+```
+
+Global comparison is significant, test for pairwise comparisons among time ranges across spawning events.
+
+```{r}
+# Tukey
+tukey <- TukeyHSD(anova)
+
+kable(
+  as.data.frame(tukey$RANGE) %>%
+    rownames_to_column("tmp") %>%
+    separate(tmp, into = c("RANGE1", "RANGE2"), sep = 8) %>%
+    mutate(RANGE1 = str_sub(RANGE1, end = -2),
+           `p adj` = round(`p adj`, digits = 3)) %>%
+    filter(`p adj` <= 0.05) %>%
+    select(-lwr, -upr) %>%
+    arrange(RANGE1, RANGE2),
+  digits = 3,
+  caption = "Table 2c: Significant pairwise comparisons of evening temperature using Tukey-Honest Significanct Differences test."
+)
+
+```
+
+**Dissolved Oxygen (morning)**
+
+```{r}
+
+# anova
+anova <- aov(DO_MORN~RANGE, data = yoy)
+
+writeLines("\n RESULTS ANOVA")
+summary(anova)
+
+```
+
+Global comparison is significant, test for pairwise comparisons among time ranges across spawning events.
+
+```{r}
+
+# Tukey
+tukey <- TukeyHSD(anova)
+
+kable(
+  as.data.frame(tukey$RANGE) %>%
+    rownames_to_column("tmp") %>%
+    separate(tmp, into = c("RANGE1", "RANGE2"), sep = 8) %>%
+    mutate(RANGE1 = str_sub(RANGE1, end = -2),
+           `p adj` = round(`p adj`, digits = 3)) %>%
+    filter(`p adj` <= 0.05) %>%
+    select(-lwr, -upr) %>%
+    arrange(RANGE1, RANGE2),
+  digits = 3,
+  caption = "Table 2d: Significant pairwise comparisons of dissolved oxygen in the morning using Tukey-Honest Significanct Differences test."
+)
+
+```
+
+**Dissolved Oxygen (afternoon)**
+
+```{r}
+
+# anova
+anova <- aov(DO_AFTERN~RANGE, data = yoy)
+
+writeLines("\n RESULTS ANOVA")
+summary(anova)
+
+```
+
+Global comparison is significant, test for pairwise comparisons among time ranges across spawning events.
+
+```{r}
+
+# Tukey
+tukey <- TukeyHSD(anova)
+
+kable(
+  as.data.frame(tukey$RANGE) %>%
+    rownames_to_column("tmp") %>%
+    separate(tmp, into = c("RANGE1", "RANGE2"), sep = 8) %>%
+    mutate(RANGE1 = str_sub(RANGE1, end = -2),
+           `p adj` = round(`p adj`, digits = 3)) %>%
+    filter(`p adj` <= 0.05) %>%
+    select(-lwr, -upr) %>%
+    arrange(RANGE1, RANGE2),
+  digits = 3,
+  caption = "Table 2e: Significant pairwise comparisons of dissolved oxygen in the afternoon using Tukey-Honest Significanct Differences test."
+)
+
+```
+
+**Dissolved Oxygen (evening)**
+
+```{r}
+
+# anova
+anova <- aov(DO_EVEN~RANGE, data = yoy)
+
+writeLines("\n RESULTS ANOVA")
+summary(anova)
+
+```
+
+Global comparison is significant, test for pairwise comparisons among time ranges across spawning events.
+
+```{r}
+
+# Tukey
+tukey <- TukeyHSD(anova)
+
+kable(
+  as.data.frame(tukey$RANGE) %>%
+    rownames_to_column("tmp") %>%
+    separate(tmp, into = c("RANGE1", "RANGE2"), sep = 8) %>%
+    mutate(RANGE1 = str_sub(RANGE1, end = -2),
+           `p adj` = round(`p adj`, digits = 3)) %>%
+    filter(`p adj` <= 0.05) %>%
+    select(-lwr, -upr) %>%
+    arrange(RANGE1, RANGE2),
+  digits = 3,
+  caption = "Table 2f: Significant pairwise comparisons of dissolved oxygen in the evening using Tukey-Honest Significanct Differences test."
+)
+
+```
+
+**Salinity**
+
+```{r}
+
+# anova
+anova <- aov(SALINITY~RANGE, data = yoy)
+
+writeLines("\n RESULTS ANOVA")
+summary(anova)
+
+```
+
+Global comparison is significant, test for pairwise comparisons among time ranges across spawning events.
+
+```{r}
+
+# Tukey
+tukey <- TukeyHSD(anova)
+
+kable(
+  as.data.frame(tukey$RANGE) %>%
+    rownames_to_column("tmp") %>%
+    separate(tmp, into = c("RANGE1", "RANGE2"), sep = 8) %>%
+    mutate(RANGE1 = str_sub(RANGE1, end = -2),
+           `p adj` = round(`p adj`, digits = 3)) %>%
+    filter(`p adj` <= 0.05) %>%
+    select(-lwr, -upr) %>%
+    arrange(RANGE1, RANGE2),
+  digits = 3,
+  caption = "Table 2g: Significant pairwise comparisons of salinity using Tukey-Honest Significanct Differences test."
+)
+
+```
+
+**pH**
+
+```{r}
+
+# anova
+anova <- aov(PH~RANGE, data = yoy)
+
+writeLines("\n RESULTS ANOVA")
+summary(anova)
+
+```
+
+Global comparison is significant, test for pairwise comparisons among time ranges across spawning events.
+
+```{r}
+
+# Tukey
+tukey <- TukeyHSD(anova)
+
+kable(
+  as.data.frame(tukey$RANGE) %>%
+    rownames_to_column("tmp") %>%
+    separate(tmp, into = c("RANGE1", "RANGE2"), sep = 8) %>%
+    mutate(RANGE1 = str_sub(RANGE1, end = -2),
+           `p adj` = round(`p adj`, digits = 3)) %>%
+    filter(`p adj` <= 0.05) %>%
+    select(-lwr, -upr) %>%
+    arrange(RANGE1, RANGE2),
+  digits = 3,
+  caption = "Table 2h: Significant pairwise comparisons of PH using Tukey-Honest Significanct Differences test."
+)
+
+```
+
+Calculate mean, median, 5th and 95th percentile for salinity, pH, temperature, and dissolved oxygen measurements as potential constraining (explanatory) variables for RDA.
+
+```{r}
+
+param <- yoy %>%
+  group_by(RANGE) %>%
+  summarize(TEMP_AFTERN_MEAN = mean(TEMP_AFTERN, na.rm = TRUE),
+            TEMP_AFTERN_qnt_5  = quantile(TEMP_AFTERN, probs = 0.05),
+            TEMP_AFTERN_qnt_95  = quantile(TEMP_AFTERN, probs= 0.95),
+            TEMP_AFTERN_qnt_50  = quantile(TEMP_AFTERN, probs= 0.5),
+            DO_EVEN_MEAN = mean(DO_EVEN, na.rm = TRUE),
+            DO_EVEN_qnt_5  = quantile(DO_EVEN, probs = 0.05),
+            DO_EVEN_qnt_50  = quantile(DO_EVEN, probs = 0.5),
+            DO_EVEN_qnt_95  = quantile(DO_EVEN, probs = 0.95),
+            SALINITY_MEAN = mean(SALINITY, na.rm = TRUE),
+            SALINITY_qnt_5  = quantile(SALINITY, probs = 0.05),
+            SALINITY_qnt_50  = quantile(SALINITY, probs = 0.5),
+            SALINITY_qnt_95  = quantile(SALINITY, probs = 0.95),
+            PH_MEAN = mean(PH, na.rm = TRUE),
+            PH_qnt_5  = quantile(PH, probs = 0.05),
+            PH_qnt_50  = quantile(PH, probs = 0.5),
+            PH_qnt_95  = quantile(PH, probs = 0.95))
+
+# ensure that geographic matrix is in the same sequence as genetic matrix
+env <- as.data.frame(indNames(gen)) %>%
+  rename(LIB_ID = `indNames(gen)`) %>%
+  separate(LIB_ID, into = c("SP", "WELL", "SAMPLE_ID"), 
+           sep = "_", extra = "merge", remove = FALSE) %>%
+  separate(SAMPLE_ID, into = c("tmp1", "tmp2"),
+           sep = "_", remove = FALSE) %>%
+  left_join(pedigree) %>%
+  rename(SPAWNING_EVENT = GRP) %>%
+  mutate(R = str_sub(SAMPLE_POINT, -1),
+         RANGE = as.character(glue("{SPAWNING_EVENT}_{R}"))) %>%
+  left_join(param) %>%
+  select(SALINITY_MEAN, SALINITY_qnt_5, SALINITY_qnt_50, SALINITY_qnt_95,
+         PH_MEAN, PH_qnt_5, PH_qnt_50, PH_qnt_95,
+         TEMP_AFTERN_MEAN, TEMP_AFTERN_qnt_5, TEMP_AFTERN_qnt_95, TEMP_AFTERN_qnt_50,
+         DO_EVEN_MEAN)
+
+```
+
+
+## Variable selection
+
+Run step-wise selection of variables using p(in)-value < 0.15 and p(out)-value > 0.1; run forward selection of variable using R2 value and Pin < 0.1 to identify best model(s).
+
+```{r}
+
+# run initial rda
+rda <- rda(allelecount ~ ., data.frame(env), scale = FALSE)
+
+writeLines("\n \nSTEPWISE SELECTION OF VARIABLES (P(in) = 0.15/P(out) = 0.1")
+
+# forward selection of variables
+stp <- ordistep(rda(allelecount ~ 1, data.frame(env)), 
+                   scope = formula(rda), 
+                   scale = FALSE, 
+                   direction = "both",
+                   Pin = 0.15, Pout = 0.1,
+                   pstep = 999,
+                   parallel = 45)
+
+writeLines("\n \nFORWARD SELECTION OF VARIABLES USING R2 value.")
+
+# forward selection of variables
+R2stp <- ordiR2step(rda(allelecount ~ 1, data.frame(env)), 
+                  scope = formula(rda), 
+                  scale = FALSE, 
+                  direction = "forward",
+                  Pin = 0.1,
+                  R2scope = TRUE,
+                  pstep = 999,
+                  parallel = 45)
+
+```
+
+Step-wise selection of variables selects parameters `r knitr::combine_words(attributes(stp$terms)$term.labels)` as the best model. By contrast, forward selection of variables using R2 as the criterion results selects the combination of `r knitr::combine_words(attributes(R2stp$terms)$term.labels)` as best model.
+
+```{r}
+
+model3 <- c("PH_qnt_95", "TEMP_AFTERN_MEAN", "DO_EVEN_MEAN", "PH_qnt_5", "SALINITY_qnt_50")
+
+```
+
+Build model using parameters selected using both models `r knitr::combine_words(model3)`
+
+
+# RDA of progeny with environmental parameters by spawning event
+
+Determine proportion of genetic variance explained by environmental parameters of outdoor grow-out ponds while controling for family effects by running partial RDA using allele counts as response variables, dummy variables indicating parentage as conditioning matrix, and environmental parameters (`r knitr::combine_words(model3)`; parameters in common with both selected best models) as constraining matrix.
+
+```{r}
+
+# response matrix
+X <- allelecount
+
+# explanatory matrix
+Y <- env %>%
+  select(one_of(model3))
+
+# conditioning matrix
+Z <- fam
+
+rda <- rda(X, Y, Z, scale = FALSE)
+
+writeLines("\n Summary of RDA results")
+rda
+
+R2 <- RsquareAdj(rda)
+
+```
+
+R2 (`r round(as.numeric(R2$r.squared), digits =3)`) needs to be adjusted based on the number of predictors, as the number of explanatory variables inflates the apparent amount of explained variance due to random correlation. The adjusted R2 value is `r round(as.numeric(R2$adj.r.squared), digits =3)`.
+
+Test for significance using a permutation test to generate p-value indicating whether to reject null hypothesis (environmental data does not explain genetic variation). Rows of unconstrained matrix (genetic data set) are repeatedly randomized for n permutations. Relationship is considered significant if observed relationship is stronger than the randomly permuted relationships.
+
+```{r}
+
+anova.cca(rda, 
+          permutations = 999,
+          parallel = 45)
+
+```
+
+Proportion of variance explained by the environmental predictors is `Proportion` column of `Constrained` row in summary table (equivalent to R2 of multiple regression). 
+
+The eigenvalues for the constrained axes reflect the variance explained by each canonical axis; two constraining variables were aliased, leaving two RDA axis. The environmental vectors were fit unto the ordination to obtain projections for aliased and other terms.
+
+```{r}
+
+# compare eigenvalues
+summary(eigenvals(rda, model = "constrained"))
+
+# get fitted vectors (linear constraints)
+env_var <- envfit(ord = rda, env = Y)
+
+fitted_var <- as.data.frame(env_var$vectors$arrows) %>%
+  rownames_to_column("ENV")
+
+```
+
+
+## Variance partitioning
+
+Variance partitioning was used to compare the contribution of family and variation in the selected environmental parameters in structuring observed genomic variation. A full model, using family and environmental variables, a partial model, using family conditioned on environmental variables, and a partial model, using environmental data conditioned on family, were considered to partition the explainable variance into individual (family or environment) and shared components (family plus environment), using `vegan`. Significance of each component was tested using 1,000 permutations.
+
+Partition variance to determine if geographic location or environmental data driving observed pattern(s).
+
+* full model: family + environmental variables
+* partial model I: family data explain genetic data conditioned on environmental variables
+* partial model II: environmental data explain genetic data conditioned on family data
+
+Partition the explainable variance (i.e. total inertia for constrain matrix of full model): determine total, constrained, unconstrained values of inertia/proportion of total inertia (variance).
+
+Perform RDA for all variables (spatial and environmental; full model).
+
+```{r}
+
+fam.mat <- as.matrix(Z)
+
+env.mat <- env %>%
+  select(one_of(model3)) %>%
+  as.matrix()
+
+# overall model
+rda.all <- rda(allelecount ~ fam.mat + env.mat, scale = FALSE)
+
+rda.all
+
+```
+
+Test for significance of overall model.
+
+```{r}
+
+# Test significance of overall model
+sig_overall_all <- anova.cca(rda.all,
+                   permutations = 999,
+                   parallel = 45)
+
+pval_overall_all <- sig_overall_all$`Pr(>F)`[1]
+
+```
+
+The overall model is significant (P = `r pval_overall_all`).
+
+
+Partition the variation in genetic data into components accounted for by environmental and spatial variables and their combined effect using adjusted R squared to assess partitions explained by explanatory tables and their combinations.
+
+```{r}
+
+# Partition the variance ====
+vpart.all <- varpart(allelecount, ~ fam.mat, ~ env.mat)
+
+vpart.all
+
+```
+
+Extract fraction explained by each component:
+
+* a+b: variation explained by family variables (independent/marginal effect, i.e. variation explained if family variables only explanatory variables).
+* b+c: variation explained by environmental variables (marginal effect of environmental variables).
+* a+b+c: variation explained by X1 (family variables), X2 (environmental variables), and shared effect of X1 + X2 (i.e. result of correlation between both sets of variables)
+* a: conditioned/partial variation explained by X1 (family variables)
+* b: shared variation explained by X1 (family variables) and X2 (environmental variables); cannot be attributed to one or the other (i.e. result of correlation between both sets of variables).
+* c: conditioned/partial variation explained by X2 (environmental variables)
+* d: residual (unexplained)
+
+
+Test significance of all components using permuted p-values.
+
+```{r}
+
+# adjusted R squared for each component
+partitions <- c("fam+shared", "env+shared", "fam+env+shared", "fam", "shared", "env", "residuals")
+
+all_values <- c(vpart.all$part$fract$Adj.R.squared, vpart.all$part$indfract$Adj.R.squared)
+
+# Test significance of individual fractions ====
+all_pvals <- c()
+
+# Significance of xy + shared
+sig_geo_shared_all <- anova.cca(rda(allelecount, fam.mat),
+                                permutations = 999, parallel = 55)
+
+all_pvals[1] <- sig_geo_shared_all$`Pr(>F)`[1]
+
+# Significance of env + shared
+sig_env_shared_all <- anova.cca(rda(allelecount, env.mat),
+                                permutations = 999, parallel = 55)
+
+all_pvals[2] <- sig_env_shared_all$`Pr(>F)`[1]
+
+# Significance of xy + shared + env
+exp_vars <- cbind(env.mat, fam.mat)
+
+sig_geo_shared_env_all <- anova.cca(rda(allelecount, exp_vars),
+                                    permutations = 999, parallel = 55)
+
+all_pvals[3] <- sig_geo_shared_env_all$`Pr(>F)`[1]
+
+# Significance of xy
+sig_geo_all <- anova.cca(rda(allelecount, fam.mat, env.mat),
+                         permutations = 999, parallel = 55)
+
+all_pvals[4] <- sig_geo_all$`Pr(>F)`[1]
+
+# Significance of shared fraction is untestable
+all_pvals[5] <- NA
+
+# Significance of env
+sig_env_all <- anova.cca(rda(allelecount, env.mat, fam.mat),
+                         permutations = 999, parallel = 55)
+
+all_pvals[6] <- sig_env_all$`Pr(>F)`[1]
+
+# Significance of residual fraction is untestable
+all_pvals[7] <- NA
+
+# combine into single table
+partition_sign <- data.frame(partitions, all_values, all_pvals) %>%
+  rename(PARTITION = partitions,
+         VARIANCE = all_values,
+         PVAL = all_pvals) %>%
+  arrange(desc(VARIANCE))
+
+write_delim(partition_sign, "results/variation_partitioning.rda", delim = "\t")
+
+kable(
+  partition_sign,
+  digits = 3,
+  caption = "Table 3: Variance partitioning of variance explained by family (fam), environmental variables (env), and shared effects due to correlation of family and env."
+)
+
+```
+
+
+## Clustering of individuals
+
+Compare clustering of individuals according to spawning event and family for component of genomic signal explained by differences in environmental conditions in the grow-out ponds after adjusting for family.
+
+```{r fig.cap="Fig 6a: pRDA biplot indicating environmental variables (arrows) and clustering of individuals by spawning event (shape) and sample point (fill).", fig.height=7, fig.width=7}
+
+n <- 5  
+
+# extract individual loadings (LC)
+lc <- as.data.frame(rda$CCA$u) %>%
+    rownames_to_column("LIB_ID") %>%
+    magrittr::set_names(c("LIB_ID", paste0("RDA", seq(1:n), "_LC")))
+
+# scale by eigenvalues
+scale <- scores(rda, 1:n, display = "lc", scaling = "sites") %>%
+    as.data.frame() %>%
+    rownames_to_column("LIB_ID") %>%
+    magrittr::set_names(c("LIB_ID", paste0("RDA", seq(1:n), "_LC_SCALED1"))) %>%
+    left_join(lc)
+  
+# symmetric scaling by square root of eigenvalues
+lc <- scores(rda, 1:n, display = "lc", scaling = "symmetric") %>%
+    as.data.frame() %>%
+    rownames_to_column("LIB_ID") %>%
+    magrittr::set_names(c("LIB_ID", paste0("RDA", seq(1:n), "_LC_SCALED3"))) %>%
+    left_join(scale)
+  
+  
+# extract individual loadings (WA)
+wa <- as.data.frame(rda$CCA$wa) %>%
+    rownames_to_column("LIB_ID") %>%
+    magrittr::set_names(c("LIB_ID", paste0("RDA", seq(1:n), "_WA")))
+  
+# scale by eigenvalues
+scale <- scores(rda, 1:n, display = "wa", scaling = "sites") %>%
+    as.data.frame() %>%
+    rownames_to_column("LIB_ID") %>%
+    magrittr::set_names(c("LIB_ID", paste0("RDA", seq(1:n), "_WA_SCALED1"))) %>%
+    left_join(wa)
+  
+# symmetric scaling by square root of eigenvalues
+wa <- scores(rda, 1:n, display = "wa", scaling = "symmetric") %>%
+    as.data.frame() %>%
+    rownames_to_column("LIB_ID") %>%
+    magrittr::set_names(c("LIB_ID", paste0("RDA", seq(1:n), "_WA_SCALED3"))) %>%
+    left_join(scale)
+
+# combine all loadings
+loadings <- bind_cols(lc, wa) %>%
+    rename(LIB_ID = LIB_ID...1)
+  
+ind_rda.env <- loadings %>%
+  separate(LIB_ID, into = c("SP", "WELL", "SAMPLE_ID"), 
+           sep = "_", extra = "merge", remove = FALSE) %>%
+  separate(SAMPLE_ID, into = c("tmp1", "tmp2"),
+           sep = "_", remove = FALSE) %>%
+  left_join(pedigree) %>%
+  rename(SPAWNING_EVENT = GRP) %>%
+  unite(BLOCK, SPAWNING_EVENT, SAMPLE_POINT, sep = "_", remove = FALSE)
+
+# plot
+ggplot() +
+  geom_point(data = ind_rda.env, aes(x = RDA1_WA_SCALED3, RDA2_WA_SCALED3, 
+                                     fill = BLOCK, shape = SPAWNING_EVENT),
+             size = 3) +
+  geom_vline(xintercept = 0, color = "black", linetype = "dashed") +
+  geom_hline(yintercept = 0, color = "black", linetype = "dashed") +
+  geom_label_repel(data = fitted_var, aes(x = RDA1, y = RDA2, label = ENV)) +
+  geom_segment(data = fitted_var, aes(x = 0, y = 0, xend = RDA1, yend = RDA2),
+               arrow = arrow(length = unit(0.2, "cm")),
+               color="black", size = 1) +
+  scale_fill_manual(values = col_nine) +
+  scale_shape_manual(values = c(21, 22, 24)) +
+  labs(x = "RDA 1", y = "RDA 2") +
+  theme_standard +
+  theme(legend.position = "bottom") +
+  guides(fill = guide_legend(override.aes = list(shape = 21),
+                             ncol = 3, byrow = TRUE,
+                             title.position = "top"),
+         shape = guide_legend(ncol = 1, byrow = TRUE,
+                              title.position = "top"))
+
+```
+
+Compare distribution of progeny by within spawning events.
+
+```{r fig.cap="Fig 6b: pRDA biplot indicating environmental variables (arrows) and clustering of individuals by spawning event (shape) and sample point (fill).", fig.height=18, fig.width=6}
+
+
+ggplot(ind_rda.env, aes(x = RDA1_WA_SCALED3, RDA2_WA_SCALED3,
+                        fill = BLOCK, color = BLOCK,
+                        shape = SPAWNING_EVENT, group = BLOCK)) +
+  geom_point(size = 3, color = "black") +
+  geom_vline(xintercept = 0, color = "black", linetype = "dashed") +
+  geom_hline(yintercept = 0, color = "black", linetype = "dashed") +
+  stat_ellipse() +
+  facet_grid(SPAWNING_EVENT ~ .) +
+  scale_fill_manual(values = col_nine) +
+  scale_color_manual(values = col_nine) +
+  scale_shape_manual(values = c(21, 22, 24)) +
+  labs(x = "RDA 1", y = "RDA 2") +
+  theme_facet +
+  theme(legend.position = "bottom") +
+  guides(fill = guide_legend(override.aes = list(shape = 21),
+                             ncol = 3, byrow = TRUE,
+                             title.position = "top"),
+         shape = guide_legend(ncol = 1, byrow = TRUE,
+                              title.position = "top"))
+
+```
+
+Compare distribution of progeny by dam across spawning events and sample points.
+
+```{r fig.cap="Fig 6c: pRDA indicating clustering of individuals by spawning event (shape) and sample point (fill) per dam.", fig.height=23, fig.width=9}
+
+ggplot(data = ind_rda.env, aes(x = RDA1_WA_SCALED3, RDA2_WA_SCALED3, 
+                               fill = BLOCK, shape = SPAWNING_EVENT)) +
+  geom_vline(xintercept = 0, color = "black", linetype = "dashed") +
+  geom_hline(yintercept = 0, color = "black", linetype = "dashed") +
+  geom_point(size = 3) +
+  scale_fill_manual(values = col_nine) +
+  scale_shape_manual(values = c(21, 22, 24)) +
+  facet_grid(dam ~ SPAWNING_EVENT) +
+  labs(x = "RDA1", y = "RDA2") +
+  theme_facet +
+  theme(legend.position = "bottom") +
+  guides(fill = guide_legend(override.aes = list(shape = 21),
+                             ncol = 3, byrow = TRUE,
+                             title.position = "top"),
+         shape = guide_legend(ncol = 1, byrow = TRUE,
+                              title.position = "top"))
+
+```
+
+Compare distribution of progeny by sire across spawning events and sample points.
+
+```{r fig.cap="Fig 6d: pRDA indicating clustering of individuals by spawning event (shape) and sample point (fill) per sire", fig.height=28, fig.width=9}
+
+ggplot(data = ind_rda.env, aes(x = RDA1_WA_SCALED3, RDA2_WA_SCALED3, 
+                               fill = BLOCK, shape = SPAWNING_EVENT)) +
+  geom_vline(xintercept = 0, color = "black", linetype = "dashed") +
+  geom_hline(yintercept = 0, color = "black", linetype = "dashed") +
+  geom_point(size = 3) +
+  scale_fill_manual(values = col_nine) +
+  scale_shape_manual(values = c(21, 22, 24)) +
+  facet_grid(sire ~ SPAWNING_EVENT) +
+  labs(x = "RDA1", y = "RDA2") +
+  theme_facet +
+  theme(legend.position = "bottom") +
+  guides(fill = guide_legend(override.aes = list(shape = 21),
+                             ncol = 3, byrow = TRUE,
+                             title.position = "top"),
+         shape = guide_legend(ncol = 1, byrow = TRUE,
+                              title.position = "top"))
+
+```
+
+
+## Associated loci
+
+Use the Mahalanobis distance to identify alleles with strongest associations to first two RDA axes (p < 0.001).
+
+```{r fig.cap="Fig 7a: Distribution of loci flagged as non-associated (grey) vs outlier (red) based on Mahalanobis distance threshold of 13.82 (p < 0.001.", fig.width=7, fig.height=8}
+
+# number of axis
+n <- 5
+
+# extract allele loadings
+loadings <- as.data.frame(rda$CCA$v) %>%
+  rownames_to_column("LOCUS") %>%
+  separate(LOCUS, into = c("SCAFFOLD", "pilon", "POS"), sep = "_", remove = FALSE)
+  
+# scale by eigenvalues
+scale <- scores(rda, 1:n, display = "species", scaling = "species") %>%
+  as.data.frame()
+  
+loadings <- bind_cols(loadings, scale)
+  
+# scale by square root of eigenvalues
+scale <- scores(rda, 1:n, display = "species", scaling = "symmetric") %>%
+  as.data.frame(scale$default)
+  
+loadings <- bind_cols(loadings, scale)
+  
+# fix column names
+col <- c("LOCUS", "SCAFFOLD", "pilon", "POS", 
+          paste0("RDA", seq(1:n)), 
+          paste0("RDA", seq(1:n), "_SCALED1"), 
+          paste0("RDA", seq(1:n), "_SCALED3"))
+  
+colnames(loadings) <- col
+
+locus_rda.env <- loadings %>%
+  select(-pilon)
+
+temp <- locus_rda.env %>%
+  select(LOCUS, RDA1, RDA2) %>%
+  select(-LOCUS)
+
+# count loci
+mah <- as.data.frame(mahalanobis(temp, colMeans(temp), cov(temp), decreasing = TRUE)) %>%
+  rownames_to_column("LOCUS") %>%
+  rename(MAH_DIST = `mahalanobis(temp, colMeans(temp), cov(temp), decreasing = TRUE)`)
+
+write_delim(mah, "results/mahalanobis_range.locus", delim = "\t")
+
+# bivariate (p < 0.001) for 6 axis critical value is 22.46 (for 2 axis 13.82)
+kable(
+  count(mah, MAH_DIST >= 13.82) %>%
+    filter(`MAH_DIST >= 13.82` == TRUE),
+  caption = "Table 4: Number of significantly associated loci (Mahalanobis distance >= 13.82)"
+)
+
+# add information to data frame
+locus_rda.env <- left_join(locus_rda.env, mah) %>%
+  mutate(RDA_OUTLIER = case_when(MAH_DIST > 13.82 ~ "p < 0.001",
+                                 MAH_DIST > 9.21 & MAH_DIST <= 13.82 ~ "p < 0.01",
+                                 MAH_DIST > 6 & MAH_DIST <= 9.21 ~ "p < 0.05",
+                                 MAH_DIST <= 6 ~ "NON_ASSOCIATED"),
+         RDA_OUTLIER = ordered(RDA_OUTLIER, levels = c("p < 0.001", "p < 0.01", "p < 0.05", "NON_ASSOCIATED")),
+         POS = as.numeric(POS))
+
+ggplot() +
+  geom_point(data = locus_rda.env, 
+             aes(x = RDA1_SCALED3, y = RDA2_SCALED3, color = RDA_OUTLIER),
+             shape = 21, size = 3) +
+  geom_segment(data = fitted_var, aes(x = 0, y = 0, xend = RDA1, yend = RDA2),
+               arrow = arrow(length = unit(0.2, "cm")),
+               color="darkred", size = 1) +
+  geom_label_repel(data = fitted_var, aes(x = RDA1, y = RDA2, label = ENV)) +
+  coord_fixed(ratio = 1) +
+  geom_vline(xintercept = 0, color = "darkred", linetype = "dashed", size = 0.5) +
+  geom_hline(yintercept = 0, color = "darkred", linetype = "dashed", size = 0.5) +
+  scale_color_manual(values = c("red", "darkorange", "gold", "grey")) +
+  labs(x = "RDA 1", y = "RDA 2") +
+  theme_standard
+
+sign_loci <- mah %>%
+  filter(MAH_DIST >= 13.82)
+
+write_delim(sign_loci, "results/pRDA_sign_loci_model3.rda", delim = "\t")
+
+```
+
+Compare distribution of flagged loci on genome scaffolds.
+
+```{r fig.cap="Fig 7b: Distribution of Mahalanobis distance per locus across the genome.", fig.width=10, fig.height=4}
+
+ggplot(locus_rda.env, aes(x = LOCUS, y = MAH_DIST, fill = RDA_OUTLIER)) +
+  geom_point(shape = 21, size = 2) +
+  labs(x = "position", y = "Mahalanobis Distance") +
+  scale_fill_manual(values = c("red", "darkorange", "gold", "grey")) +
+  theme_standard +
+  theme(legend.position = "none",
+        axis.text.x = element_blank())
+
+kable(
+  locus_rda.env %>%
+    filter(!RDA_OUTLIER == "NON_ASSOCIATED") %>%
+    group_by(SCAFFOLD) %>%
+    count(RDA_OUTLIER) %>%
+    ungroup() %>%
+    spread(key = RDA_OUTLIER, value = n) %>%
+    replace(is.na(.), 0) %>%
+    mutate(total_outlier = `p < 0.001`+`p < 0.01`+`p < 0.05`) %>%
+    filter(total_outlier > 1) %>%
+    arrange(desc(total_outlier)),
+  caption = "Table 5: Number of loci flagged as significantly correlated per scaffold."
+)
+
+```
+
+Compare clustering of flagged loci on scaffolds with four flagged loci.
+
+```{r fig.cap="Fig 7c: Distribution of Mahalanobis distance per locus for scaffolds with 4 flagged outlier loci. Loci above red dashed line are flagged as significantly associated.", fig.width=10, fig.height=4}
+
+tmp <- locus_rda.env %>%
+  filter(SCAFFOLD %in% c("scf7180000009121")) %>%
+  mutate(POS = as.numeric(POS)/100000)
+
+ggplot(tmp, aes(x = POS, y = MAH_DIST, fill = RDA_OUTLIER)) +
+  geom_point(fill = "darkorange", shape = 21, size = 2) +
+  geom_hline(yintercept = c(13.82, 9.21, 6), color = "darkred", linetype = "dashed") +
+  labs(x = "position (kb)", y = " ",
+       title = "scaffold scf7180000009121") +
+  scale_y_continuous(limits = c(0, 40)) +
+  scale_fill_manual(values = c("darkred", "darkorange", "gold", "grey")) +
+  theme_standard +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+
+```
+
+Compare clustering of flagged loci on scaffolds with three flagged loci.
+
+```{r fig.cap="Fig 7d: Distribution of Mahalanobis distance per locus for scaffolds with three flagged outlier loci. Loci above red dashed line are flagged as significantly associated.", fig.width=10, fig.height=40}
+
+tmp <- locus_rda.env %>%
+  filter(SCAFFOLD %in% c("scf7180000009161")) %>%
+  mutate(POS = as.numeric(POS)/100000)
+
+p1 <- ggplot(tmp, aes(x = POS, y = MAH_DIST, fill = RDA_OUTLIER)) +
+  geom_point(fill = "darkorange", shape = 21, size = 2) +
+  geom_hline(yintercept = c(13.82, 9.21, 6), color = "darkred", linetype = "dashed") +
+  labs(x = "position (kb)", y = " ",
+       title = "scaffold scf7180000009161") +
+  scale_y_continuous(limits = c(0, 40)) +
+  scale_fill_manual(values = c("darkred", "darkorange", "gold", "grey")) +
+  theme_standard +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+
+
+tmp <- locus_rda.env %>%
+  filter(SCAFFOLD %in% c("scf7180000009255")) %>%
+  mutate(POS = as.numeric(POS)/100000)
+
+p2 <- ggplot(tmp, aes(x = POS, y = MAH_DIST, fill = RDA_OUTLIER)) +
+  geom_point(fill = "darkorange", shape = 21, size = 2) +
+  geom_hline(yintercept = c(13.82, 9.21, 6), color = "darkred", linetype = "dashed") +
+  labs(x = "position (kb)", y = " ",
+       title = "scaffold scf7180000009255") +
+  scale_y_continuous(limits = c(0, 40)) +
+  scale_fill_manual(values = c("darkred", "darkorange", "gold", "grey")) +
+  theme_standard +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+
+
+tmp <- locus_rda.env %>%
+  filter(SCAFFOLD %in% c("scf7180000009291")) %>%
+  mutate(POS = as.numeric(POS)/100000)
+
+p3 <- ggplot(tmp, aes(x = POS, y = MAH_DIST, fill = RDA_OUTLIER)) +
+  geom_point(fill = "darkorange", shape = 21, size = 2) +
+  geom_hline(yintercept = c(13.82, 9.21, 6), color = "darkred", linetype = "dashed") +
+  labs(x = "position (kb)", y = " ",
+       title = "scaffold scf7180000009291") +
+  scale_y_continuous(limits = c(0, 40)) +
+  scale_fill_manual(values = c("darkred", "darkorange", "gold", "grey")) +
+  theme_standard +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+
+
+tmp <- locus_rda.env %>%
+  filter(SCAFFOLD %in% c("scf7180000009305")) %>%
+  mutate(POS = as.numeric(POS)/100000)
+
+p4 <- ggplot(tmp, aes(x = POS, y = MAH_DIST, fill = RDA_OUTLIER)) +
+  geom_point(fill = "darkorange", shape = 21, size = 2) +
+  geom_hline(yintercept = c(13.82, 9.21, 6), color = "darkred", linetype = "dashed") +
+  labs(x = "position (kb)", y = " ",
+       title = "scaffold scf7180000009305") +
+  scale_y_continuous(limits = c(0, 40)) +
+  scale_fill_manual(values = c("darkred", "darkorange", "gold", "grey")) +
+  theme_standard +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+
+
+tmp <- locus_rda.env %>%
+  filter(SCAFFOLD %in% c("scf7180000009492")) %>%
+  mutate(POS = as.numeric(POS)/100000)
+
+p5 <- ggplot(tmp, aes(x = POS, y = MAH_DIST, fill = RDA_OUTLIER)) +
+  geom_point(fill = "darkorange", shape = 21, size = 2) +
+  geom_hline(yintercept = c(13.82, 9.21, 6), color = "darkred", linetype = "dashed") +
+  labs(x = "position (kb)", y = " ",
+       title = "scaffold scf7180000009492") +
+  scale_y_continuous(limits = c(0, 40)) +
+  scale_fill_manual(values = c("darkred", "darkorange", "gold", "grey")) +
+  theme_standard +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+
+
+tmp <- locus_rda.env %>%
+  filter(SCAFFOLD %in% c("scf7180000009535")) %>%
+  mutate(POS = as.numeric(POS)/100000)
+
+p6 <- ggplot(tmp, aes(x = POS, y = MAH_DIST, fill = RDA_OUTLIER)) +
+  geom_point(fill = "darkorange", shape = 21, size = 2) +
+  geom_hline(yintercept = c(13.82, 9.21, 6), color = "darkred", linetype = "dashed") +
+  labs(x = "position (kb)", y = "Mahalanobis Distance",
+       title = "scaffold scf7180000009535") +
+  scale_y_continuous(limits = c(0, 40)) +
+  scale_fill_manual(values = c("darkred", "darkorange", "gold", "grey")) +
+  theme_standard +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+
+
+tmp <- locus_rda.env %>%
+  filter(SCAFFOLD %in% c("scf7180000009563")) %>%
+  mutate(POS = as.numeric(POS)/100000)
+
+p7 <- ggplot(tmp, aes(x = POS, y = MAH_DIST, fill = RDA_OUTLIER)) +
+  geom_point(fill = "darkorange", shape = 21, size = 2) +
+  geom_hline(yintercept = c(13.82, 9.21, 6), color = "darkred", linetype = "dashed") +
+  labs(x = "position (kb)", y = " ",
+       title = "scaffold scf7180000009563") +
+  scale_y_continuous(limits = c(0, 40)) +
+  scale_fill_manual(values = c("darkred", "darkorange", "gold", "grey")) +
+  theme_standard +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+
+
+tmp <- locus_rda.env %>%
+  filter(SCAFFOLD %in% c("scf7180000012298")) %>%
+  mutate(POS = as.numeric(POS)/100000)
+
+p8 <- ggplot(tmp, aes(x = POS, y = MAH_DIST, fill = RDA_OUTLIER)) +
+  geom_point(fill = "darkorange", shape = 21, size = 2) +
+  geom_hline(yintercept = c(13.82, 9.21, 6), color = "darkred", linetype = "dashed") +
+  labs(x = "position (kb)", y = " ",
+       title = "scaffold scf7180000012298") +
+  scale_y_continuous(limits = c(0, 40)) +
+  scale_fill_manual(values = c("darkred", "darkorange", "gold", "grey")) +
+  theme_standard +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+
+
+tmp <- locus_rda.env %>%
+  filter(SCAFFOLD %in% c("scf7180000012302")) %>%
+  mutate(POS = as.numeric(POS)/100000)
+
+p9 <- ggplot(tmp, aes(x = POS, y = MAH_DIST, fill = RDA_OUTLIER)) +
+  geom_point(fill = "darkorange", shape = 21, size = 2) +
+  geom_hline(yintercept = c(13.82, 9.21, 6), color = "darkred", linetype = "dashed") +
+  labs(x = "position (kb)", y = " ",
+       title = "scaffold scf7180000012302") +
+  scale_y_continuous(limits = c(0, 40)) +
+  scale_fill_manual(values = c("darkred", "darkorange", "gold", "grey")) +
+  theme_standard +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+
+
+tmp <- locus_rda.env %>%
+  filter(SCAFFOLD %in% c("scf7180000012359")) %>%
+  mutate(POS = as.numeric(POS)/100000)
+
+p10 <- ggplot(tmp, aes(x = POS, y = MAH_DIST, fill = RDA_OUTLIER)) +
+  geom_point(fill = "darkorange", shape = 21, size = 2) +
+  geom_hline(yintercept = c(13.82, 9.21, 6), color = "darkred", linetype = "dashed") +
+  labs(x = "position (kb)", y = " ",
+       title = "scaffold scf7180000012359") +
+  scale_y_continuous(limits = c(0, 40)) +
+  scale_fill_manual(values = c("darkred", "darkorange", "gold", "grey")) +
+  theme_standard +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+
+
+tmp <- locus_rda.env %>%
+  filter(SCAFFOLD %in% c("scf7180000012438")) %>%
+  mutate(POS = as.numeric(POS)/100000)
+
+p11 <- ggplot(tmp, aes(x = POS, y = MAH_DIST, fill = RDA_OUTLIER)) +
+  geom_point(fill = "darkorange", shape = 21, size = 2) +
+  geom_hline(yintercept = c(13.82, 9.21, 6), color = "darkred", linetype = "dashed") +
+  labs(x = "position (kb)", y = " ",
+       title = "scaffold scf7180000012438") +
+  scale_y_continuous(limits = c(0, 40)) +
+  scale_fill_manual(values = c("darkred", "darkorange", "gold", "grey")) +
+  theme_standard +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+
+multiplot(p1, p2, p3, p4,
+          p5, p6, p7, p8,
+          p9, p10, p11, cols = 1)
+
+```
+
+Compare clustering of flagged loci on scaffolds with two flagged loci.
+
+```{r fig.cap="Fig 7e: Distribution of Mahalanobis distance per locus for scaffolds with two flagged outlier loci. Loci above red dashed line are flagged as significantly associated.", fig.width=10, fig.height=50}
+
+tmp <- locus_rda.env %>%
+  filter(SCAFFOLD %in% c("scf7180000009116")) %>%
+  mutate(POS = as.numeric(POS)/100000)
+
+p1 <- ggplot(tmp, aes(x = POS, y = MAH_DIST, fill = RDA_OUTLIER)) +
+  geom_point(fill = "darkorange", shape = 21, size = 2) +
+  geom_hline(yintercept = c(13.82, 9.21, 6), color = "darkred", linetype = "dashed") +
+  labs(x = "position (kb)", y = " ",
+       title = "scaffold scf7180000009116") +
+  scale_y_continuous(limits = c(0, 40)) +
+  scale_fill_manual(values = c("darkred", "darkorange", "gold", "grey")) +
+  theme_standard +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+
+
+tmp <- locus_rda.env %>%
+  filter(SCAFFOLD %in% c("scf7180000009119")) %>%
+  mutate(POS = as.numeric(POS)/100000)
+
+p2 <- ggplot(tmp, aes(x = POS, y = MAH_DIST, fill = RDA_OUTLIER)) +
+  geom_point(fill = "darkorange", shape = 21, size = 2) +
+  geom_hline(yintercept = c(13.82, 9.21, 6), color = "darkred", linetype = "dashed") +
+  labs(x = "position (kb)", y = " ",
+       title = "scaffold scf7180000009119") +
+  scale_y_continuous(limits = c(0, 40)) +
+  scale_fill_manual(values = c("darkred", "darkorange", "gold", "grey")) +
+  theme_standard +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+
+
+tmp <- locus_rda.env %>%
+  filter(SCAFFOLD %in% c("scf7180000009177")) %>%
+  mutate(POS = as.numeric(POS)/100000)
+
+p3 <- ggplot(tmp, aes(x = POS, y = MAH_DIST, fill = RDA_OUTLIER)) +
+  geom_point(fill = "darkorange", shape = 21, size = 2) +
+  geom_hline(yintercept = c(13.82, 9.21, 6), color = "darkred", linetype = "dashed") +
+  labs(x = "position (kb)", y = " ",
+       title = "scaffold scf7180000009177") +
+  scale_y_continuous(limits = c(0, 40)) +
+  scale_fill_manual(values = c("darkred", "darkorange", "gold", "grey")) +
+  theme_standard +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+
+
+tmp <- locus_rda.env %>%
+  filter(SCAFFOLD %in% c("scf7180000009298")) %>%
+  mutate(POS = as.numeric(POS)/100000)
+
+p4 <- ggplot(tmp, aes(x = POS, y = MAH_DIST, fill = RDA_OUTLIER)) +
+  geom_point(fill = "darkorange", shape = 21, size = 2) +
+  geom_hline(yintercept = c(13.82, 9.21, 6), color = "darkred", linetype = "dashed") +
+  labs(x = "position (kb)", y = " ",
+       title = "scaffold scf7180000009298") +
+  scale_y_continuous(limits = c(0, 40)) +
+  scale_fill_manual(values = c("darkred", "darkorange", "gold", "grey")) +
+  theme_standard +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+
+
+tmp <- locus_rda.env %>%
+  filter(SCAFFOLD %in% c("scf7180000009351")) %>%
+  mutate(POS = as.numeric(POS)/100000)
+
+p5 <- ggplot(tmp, aes(x = POS, y = MAH_DIST, fill = RDA_OUTLIER)) +
+  geom_point(fill = "darkorange", shape = 21, size = 2) +
+  geom_hline(yintercept = c(13.82, 9.21, 6), color = "darkred", linetype = "dashed") +
+  labs(x = "position (kb)", y = " ",
+       title = "scaffold scf7180000009351") +
+  scale_y_continuous(limits = c(0, 40)) +
+  scale_fill_manual(values = c("darkred", "darkorange", "gold", "grey")) +
+  theme_standard +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+
+
+tmp <- locus_rda.env %>%
+  filter(SCAFFOLD %in% c("scf7180000009427")) %>%
+  mutate(POS = as.numeric(POS)/100000)
+
+p6 <- ggplot(tmp, aes(x = POS, y = MAH_DIST, fill = RDA_OUTLIER)) +
+  geom_point(fill = "darkorange", shape = 21, size = 2) +
+  geom_hline(yintercept = c(13.82, 9.21, 6), color = "darkred", linetype = "dashed") +
+  labs(x = "position (kb)", y = "Mahalanobis Distance",
+       title = "scaffold scf7180000009427") +
+  scale_y_continuous(limits = c(0, 40)) +
+  scale_fill_manual(values = c("darkred", "darkorange", "gold", "grey")) +
+  theme_standard +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+
+
+tmp <- locus_rda.env %>%
+  filter(SCAFFOLD %in% c("scf7180000009429")) %>%
+  mutate(POS = as.numeric(POS)/100000)
+
+p7 <- ggplot(tmp, aes(x = POS, y = MAH_DIST, fill = RDA_OUTLIER)) +
+  geom_point(fill = "darkorange", shape = 21, size = 2) +
+  geom_hline(yintercept = c(13.82, 9.21, 6), color = "darkred", linetype = "dashed") +
+  labs(x = "position (kb)", y = " ",
+       title = "scaffold scf7180000009429") +
+  scale_y_continuous(limits = c(0, 40)) +
+  scale_fill_manual(values = c("darkred", "darkorange", "gold", "grey")) +
+  theme_standard +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+
+
+tmp <- locus_rda.env %>%
+  filter(SCAFFOLD %in% c("scf7180000009565")) %>%
+  mutate(POS = as.numeric(POS)/100000)
+
+p8 <- ggplot(tmp, aes(x = POS, y = MAH_DIST, fill = RDA_OUTLIER)) +
+  geom_point(fill = "darkorange", shape = 21, size = 2) +
+  geom_hline(yintercept = c(13.82, 9.21, 6), color = "darkred", linetype = "dashed") +
+  labs(x = "position (kb)", y = " ",
+       title = "scaffold scf7180000009565") +
+  scale_y_continuous(limits = c(0, 40)) +
+  scale_fill_manual(values = c("darkred", "darkorange", "gold", "grey")) +
+  theme_standard +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+
+
+tmp <- locus_rda.env %>%
+  filter(SCAFFOLD %in% c("scf7180000009566")) %>%
+  mutate(POS = as.numeric(POS)/100000)
+
+p9 <- ggplot(tmp, aes(x = POS, y = MAH_DIST, fill = RDA_OUTLIER)) +
+  geom_point(fill = "darkorange", shape = 21, size = 2) +
+  geom_hline(yintercept = c(13.82, 9.21, 6), color = "darkred", linetype = "dashed") +
+  labs(x = "position (kb)", y = " ",
+       title = "scaffold scf7180000009566") +
+  scale_y_continuous(limits = c(0, 40)) +
+  scale_fill_manual(values = c("darkred", "darkorange", "gold", "grey")) +
+  theme_standard +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+
+
+tmp <- locus_rda.env %>%
+  filter(SCAFFOLD %in% c("scf7180000009702")) %>%
+  mutate(POS = as.numeric(POS)/100000)
+
+p10 <- ggplot(tmp, aes(x = POS, y = MAH_DIST, fill = RDA_OUTLIER)) +
+  geom_point(fill = "darkorange", shape = 21, size = 2) +
+  geom_hline(yintercept = c(13.82, 9.21, 6), color = "darkred", linetype = "dashed") +
+  labs(x = "position (kb)", y = " ",
+       title = "scaffold scf7180000009702") +
+  scale_y_continuous(limits = c(0, 40)) +
+  scale_fill_manual(values = c("darkred", "darkorange", "gold", "grey")) +
+  theme_standard +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+
+
+tmp <- locus_rda.env %>%
+  filter(SCAFFOLD %in% c("scf7180000009895")) %>%
+  mutate(POS = as.numeric(POS)/100000)
+
+p11 <- ggplot(tmp, aes(x = POS, y = MAH_DIST, fill = RDA_OUTLIER)) +
+  geom_point(fill = "darkorange", shape = 21, size = 2) +
+  geom_hline(yintercept = c(13.82, 9.21, 6), color = "darkred", linetype = "dashed") +
+  labs(x = "position (kb)", y = " ",
+       title = "scaffold scf7180000009895") +
+  scale_y_continuous(limits = c(0, 40)) +
+  scale_fill_manual(values = c("darkred", "darkorange", "gold", "grey")) +
+  theme_standard +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+
+tmp <- locus_rda.env %>%
+  filter(SCAFFOLD %in% c("scf7180000010112")) %>%
+  mutate(POS = as.numeric(POS)/100000)
+
+p12 <- ggplot(tmp, aes(x = POS, y = MAH_DIST, fill = RDA_OUTLIER)) +
+  geom_point(fill = "darkorange", shape = 21, size = 2) +
+  geom_hline(yintercept = c(13.82, 9.21, 6), color = "darkred", linetype = "dashed") +
+  labs(x = "position (kb)", y = " ",
+       title = "scaffold scf7180000010112") +
+  scale_y_continuous(limits = c(0, 40)) +
+  scale_fill_manual(values = c("darkred", "darkorange", "gold", "grey")) +
+  theme_standard +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+
+tmp <- locus_rda.env %>%
+  filter(SCAFFOLD %in% c("scf7180000012324")) %>%
+  mutate(POS = as.numeric(POS)/100000)
+
+p13 <- ggplot(tmp, aes(x = POS, y = MAH_DIST, fill = RDA_OUTLIER)) +
+  geom_point(fill = "darkorange", shape = 21, size = 2) +
+  geom_hline(yintercept = c(13.82, 9.21, 6), color = "darkred", linetype = "dashed") +
+  labs(x = "position (kb)", y = " ",
+       title = "scaffold scf7180000012324") +
+  scale_y_continuous(limits = c(0, 40)) +
+  scale_fill_manual(values = c("darkred", "darkorange", "gold", "grey")) +
+  theme_standard +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+
+tmp <- locus_rda.env %>%
+  filter(SCAFFOLD %in% c("scf7180000012327")) %>%
+  mutate(POS = as.numeric(POS)/100000)
+
+p14 <- ggplot(tmp, aes(x = POS, y = MAH_DIST, fill = RDA_OUTLIER)) +
+  geom_point(fill = "darkorange", shape = 21, size = 2) +
+  geom_hline(yintercept = c(13.82, 9.21, 6), color = "darkred", linetype = "dashed") +
+  labs(x = "position (kb)", y = " ",
+       title = "scaffold scf7180000012327") +
+  scale_y_continuous(limits = c(0, 40)) +
+  scale_fill_manual(values = c("darkred", "darkorange", "gold", "grey")) +
+  theme_standard +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+
+tmp <- locus_rda.env %>%
+  filter(SCAFFOLD %in% c("scf7180000012435")) %>%
+  mutate(POS = as.numeric(POS)/100000)
+
+p15 <- ggplot(tmp, aes(x = POS, y = MAH_DIST, fill = RDA_OUTLIER)) +
+  geom_point(fill = "darkorange", shape = 21, size = 2) +
+  geom_hline(yintercept = c(13.82, 9.21, 6), color = "darkred", linetype = "dashed") +
+  labs(x = "position (kb)", y = " ",
+       title = "scaffold scf7180000012435") +
+  scale_y_continuous(limits = c(0, 40)) +
+  scale_fill_manual(values = c("darkred", "darkorange", "gold", "grey")) +
+  theme_standard +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+
+tmp <- locus_rda.env %>%
+  filter(SCAFFOLD %in% c("scf7180000012971")) %>%
+  mutate(POS = as.numeric(POS)/100000)
+
+p16 <- ggplot(tmp, aes(x = POS, y = MAH_DIST, fill = RDA_OUTLIER)) +
+  geom_point(fill = "darkorange", shape = 21, size = 2) +
+  geom_hline(yintercept = c(13.82, 9.21, 6), color = "darkred", linetype = "dashed") +
+  labs(x = "position (kb)", y = " ",
+       title = "scaffold scf7180000012971") +
+  scale_y_continuous(limits = c(0, 40)) +
+  scale_fill_manual(values = c("darkred", "darkorange", "gold", "grey")) +
+  theme_standard +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+
+multiplot(p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, 
+          p12, p13, p14, p15, p16, cols = 1)
+
+```
+
+
+# Identity of genes potentially associated with environment (selection)
+
+Compare significant outlier from the RDA to a preliminary draft of the red drum genome to identify genes potentially affected by selection. For each flagged locus, extract all genes with boundaries falling within 50kb using the annotated red drum scaffolds.
+
+```{r echo=TRUE, eval=FALSE}
+
+out_tbl <- read_tsv("results/pRDA_sign_loci_model3.rda") %>%
+  extract(LOCUS, into = c("locus", "pos"), regex = "(.*_pilon)_(\\d+)")
+
+# Make a list of the unique scaffolds
+contigs_uniq <- out_tbl %>%
+  pull(locus) %>%
+  unique()
+
+# Write to a file
+contigs_uniq %>%
+  write_lines("results/drum_contigs_uniq.txt")
+
+```
+
+Extract the relevant scaffolds from a `gff` files of the genome.
+
+```{bash eval=FALSE, echo=TRUE}
+
+# get annotation information for the matchin scaffolds
+zgrep -f results/drum_contigs_uniq.txt data/REF/pyu_contig3_snap2.maker.output_new.0.6.AED_annotated_blast.gff.gz > data/REF/drum_matching_scaffolds.gff
+
+```
+
+Import annotation data for scaffolds with flagged loci and identify genes withing 50kb of flagged loci.
+
+```{r echo=TRUE, eval=FALSE}
+
+anno_raw <- read_tsv("data/REF/drum_matching_scaffolds.gff", col_names = FALSE) %>%
+  filter(X3 == "gene") %>%
+  select(scaf = X1, start = X4, end = X5, id = X9) 
+
+anno_mod <- anno_raw %>%
+  extract(id, "gene_id", "ID=(Soce_v1_\\d+)|") %>%
+  extract(scaf, "scaffold", "lcl\\|(scf.*)") %>%
+  mutate(gene_id = paste(gene_id, "-RA", sep = ""))
+
+out_genes <- out_tbl %>%
+  mutate(pos = as.integer(pos)) %>% 
+  mutate(left = pos - 50000, right = pos + 50000) %>%
+  group_by(locus, pos) %>%
+  group_split() %>%
+  map(function(x) {
+    
+    #browser()
+    genes <- anno_mod %>%
+      filter(scaffold == x$locus) %>%
+      filter((start > x$left & start < x$right) |  (end > x$left & end < x$right)) %>%
+      mutate(out_pos = x$pos, out_mah = x$mah_dist)
+    
+    return(genes)
+    
+  }) %>%
+  bind_rows() %>%
+  distinct(gene_id, .keep_all = TRUE)
+
+out_info <- out_genes %>%
+  select(gene_id, out_pos, out_mah)
+
+res_tbl <- read_tsv("data/REF/output.blastp", col_names = FALSE) %>%
+  extract(X1, "gene_id", "^(Soce_v1_\\d+-RA)") %>%
+  filter(gene_id %in% out_genes$gene_id) %>%
+  left_join(out_genes, by = "gene_id") %>%
+  select(gene_id, desc = X13, start, end, out_pos, out_mah, scaffold) %>%
+  arrange(desc(out_mah), desc(start))
+
+#filtered_gene_list <- res_tbl %>%
+#  filter(out_pos >= start, out_pos <= end)
+
+# Get the gene closest to each outlier
+top_hits <- res_tbl %>%
+  group_by(scaffold, out_pos) %>% 
+  mutate(direction = case_when(out_pos < start ~ "left",
+                               out_pos >= start & out_pos <= end ~ "within",
+                               out_pos > end ~ "right"),
+         distance = case_when(direction == "left" ~ start - out_pos,
+                              direction == "within" ~ 0,
+                              direction == "right" ~ out_pos - end)) %>%
+  top_n(-1, distance) %>%
+  select(scaffold, out_pos, desc)
+
+summary_tbl <- res_tbl %>%
+  group_by(scaffold, out_pos) %>%
+  summarize(num_genes_100k = n(), mah_dist = out_mah[1]) %>%
+  arrange(desc(mah_dist)) %>%
+  left_join(top_hits, by = c("scaffold", "out_pos")) %>%
+  rename(nearest_gene = desc)
+
+# Note that the output has 34 rows for 33 outliers because one outlier has 2 genes that are equally distant
+
+write_csv(res_tbl, "results/red_drum_env_genes_tbl.csv")
+
+write_csv(summary_tbl, "results/red_drum_env_genes_summary_tbl.csv")
+
+```
+
+A total of 33 loci were flagged as significant in the RDA analysis were used to identify potential genes under selection in the red drum genome. One hundred fifty six genes were identified in 100kb windows flanking each outlier locus. A full list of the genes identified and a summary table including the outlier location.
+
+```{r}
+
+kable(
+  read_csv("results/red_drum_env_genes_summary_tbl.csv") %>%
+    arrange(desc(mah_dist)),
+  digits = 2,
+  align = "l",
+  caption = "Table 6: Number of genes with in 50kb of flagged locus and summary of gene nearest to each flagged locus."
+)
+
+```
+
+
+Top genes candidates (ranked; mahalanobis distance > 30)
+
+* solute carrier family 12 member 9-like (slc12a9): involved in potassium/sodium ion transport in teleost fishes [@Verri2012].
+* membrane-associated guanylate kinase, WW and PDZ domain-containing protein 3 (magi3): membrane associated scaffolding protein; signal trandsuction [@Wright2004].
+* methylated-DNA–protein-cysteine methyltransferase (mgmt): DNA repair [@Walter2001].
+* A disintegrin and metalloproteinase with thrombospondin motifs 7 (adamts7): zinc-dependent proteinase associated with arthritis in humans [@Liu2006].
+* 60S ribosomal protein L23a (rpl23a): ribosomal protein subunit
+* methyl-CpG-binding domain protein 6-like (mbd6): bind to heterochromatic regions [@Laget2010].
+
+
+# References
+<div id="refs"></div>
