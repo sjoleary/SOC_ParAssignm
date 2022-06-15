@@ -62,8 +62,6 @@ col_nine <- c("#44546a", "#7008a0", "#ed7d31",
 
 ```
 
-^[This is a sidenote that was entered using a footnote.]
-
 Redundancy analysis is a constrained ordination method that can be used to determine the extent to which one set of variables (explanatory variables) explains the variation in another set of variables (response variables), i.e. it is the multivariate analog of a simple linear regression [@Oksanen2010]. It assumes that the relationship between the dependent (response) and independent (explanatory) variables is linear. Here, it can be applied to understand which environmental parameters of the grow-out pond significantly explain a component of the observed pattern of genetic variation of progeny [@Forester2016; @Forester2018].
 
 A partial RDA enables examining the effect of a set of variables (explanatory variables, X) on a response matrix (Y) while controlling for a set of conditioning variables (Z) and can be applied in a case such as here where the strong effect of a set of well-characterized variables (parentage/family) might obscure the signal of a second set of variables (environmental conditions).
@@ -783,7 +781,7 @@ env <- as.data.frame(indNames(gen)) %>%
 
 Run step-wise selection of variables using p(in)-value < 0.15 and p(out)-value > 0.1; run forward selection of variable using R2 value and Pin < 0.1 to identify best model(s).
 
-```{r}
+```{r cache=TRUE}
 
 # run initial rda
 rda <- rda(allelecount ~ ., data.frame(env), scale = FALSE)
@@ -853,7 +851,7 @@ R2 (`r round(as.numeric(R2$r.squared), digits =3)`) needs to be adjusted based o
 
 Test for significance using a permutation test to generate p-value indicating whether to reject null hypothesis (environmental data does not explain genetic variation). Rows of unconstrained matrix (genetic data set) are repeatedly randomized for n permutations. Relationship is considered significant if observed relationship is stronger than the randomly permuted relationships.
 
-```{r}
+```{r cache=TRUE}
 
 anova.cca(rda, 
           permutations = 999,
@@ -910,7 +908,7 @@ rda.all
 
 Test for significance of overall model.
 
-```{r}
+```{r cache=TRUE}
 
 # Test significance of overall model
 sig_overall_all <- anova.cca(rda.all,
@@ -948,7 +946,7 @@ Extract fraction explained by each component:
 
 Test significance of all components using permuted p-values.
 
-```{r}
+```{r cache=TRUE}
 
 # adjusted R squared for each component
 partitions <- c("fam+shared", "env+shared", "fam+env+shared", "fam", "shared", "env", "residuals")
@@ -1100,17 +1098,22 @@ ggplot() +
 
 Compare distribution of progeny by within spawning events.
 
-```{r fig.cap="Fig 6b: pRDA biplot indicating environmental variables (arrows) and clustering of individuals by spawning event (shape) and sample point (fill).", fig.height=18, fig.width=6}
+```{r fig.cap="Fig 6b: pRDA biplot indicating environmental variables (arrows) and clustering of individuals by spawning event (shape) and sample point (fill).", fig.height=5, fig.width=6}
 
 
-ggplot(ind_rda.env, aes(x = RDA1_WA_SCALED3, RDA2_WA_SCALED3,
-                        fill = BLOCK, color = BLOCK,
-                        shape = SPAWNING_EVENT, group = BLOCK)) +
-  geom_point(size = 3, color = "black") +
+ggplot() +
+  geom_point(data = ind_rda.env, aes(x = RDA1_WA_SCALED3, RDA2_WA_SCALED3,
+                    fill = BLOCK, shape = SPAWNING_EVENT, group = BLOCK), 
+             size = 3, color = "black") +
   geom_vline(xintercept = 0, color = "black", linetype = "dashed") +
   geom_hline(yintercept = 0, color = "black", linetype = "dashed") +
-  stat_ellipse() +
-  facet_grid(SPAWNING_EVENT ~ .) +
+  geom_label_repel(data = fitted_var, aes(x = RDA1, y = RDA2, label = ENV)) +
+  geom_segment(data = fitted_var, aes(x = 0, y = 0, xend = RDA1, yend = RDA2),
+               arrow = arrow(length = unit(0.2, "cm")),
+               color="black", size = 1) +
+  stat_ellipse(data = ind_rda.env, aes(x = RDA1_WA_SCALED3, RDA2_WA_SCALED3,
+               color = BLOCK, shape = SPAWNING_EVENT, group = BLOCK)) +
+  facet_grid(. ~ SPAWNING_EVENT) +
   scale_fill_manual(values = col_nine) +
   scale_color_manual(values = col_nine) +
   scale_shape_manual(values = c(21, 22, 24)) +
@@ -1172,11 +1175,11 @@ ggplot(data = ind_rda.env, aes(x = RDA1_WA_SCALED3, RDA2_WA_SCALED3,
 ```
 
 
-## Associated loci
+## Identify associated loci
 
-Use the Mahalanobis distance to identify alleles with strongest associations to first two RDA axes (p < 0.001).
+Use the Mahalanobis distance to identify alleles with strongest associations to two RDA axes (p < 0.001).
 
-```{r fig.cap="Fig 7a: Distribution of loci flagged as non-associated (grey) vs outlier (red) based on Mahalanobis distance threshold of 13.82 (p < 0.001.", fig.width=7, fig.height=8}
+```{r fig.cap="Fig 7: Distribution of loci flagged as non-associated (grey) vs outlier (red) based on Mahalanobis distance threshold of 13.82 (p < 0.001.", fig.width=7, fig.height=8}
 
 # number of axis
 n <- 5
@@ -1258,9 +1261,103 @@ write_delim(sign_loci, "results/pRDA_sign_loci_model3.rda", delim = "\t")
 
 ```
 
+# Compare flagged loci
+
+## Allele frequency changes
+
+```{r}
+
+# Chris' function to get allele freq
+get_allele_freqs <- function(x) {
+
+  freq_tbl <- adegenet::genind2genpop(x, quiet = TRUE)
+  freq_tbl <- adegenet::tab(freq_tbl, freq = TRUE)
+  freq_tbl <- as.data.frame(freq_tbl)
+  freq_tbl <- tibble::rownames_to_column(freq_tbl, var = "pop")
+  freq_tbl <- tidyr::pivot_longer(freq_tbl, names_to = "allele", values_to = "freq", -.data$pop)
+  freq_tbl <- tidyr::extract(freq_tbl, .data$allele, c("locus", "allele"), "(.*)\\.(.*)")
+
+  return(freq_tbl)
+
+}
+
+# create genind object with just flagged loci
+gen_flagged <- gen[loc = sign_loci$LOCUS]
+
+# load pedigree and events/time points as strata
+pedigree <- read_delim("results/YOY.pedigree", "\t") %>%
+  unite(FAM, dam, sire, sep = "_", remove = FALSE)
+
+# ensure that family matrix is in the same sequence as genetic matrix
+strata <- as.data.frame(indNames(gen_flagged)) %>%
+  rename(LIB_ID = `indNames(gen_flagged)`) %>%
+  separate(LIB_ID, into = c("SP", "WELL", "SAMPLE_ID"), 
+           sep = "_", extra = "merge", remove = FALSE) %>%
+  select(SAMPLE_ID) %>%
+  left_join(pedigree) %>%
+  unite(family, FAM, GRP, SAMPLE_POINT, sep = "&", remove = FALSE) %>%
+  unite(time, GRP, SAMPLE_POINT, sep = "&", remove = FALSE)
+
+strata(gen_flagged) <- strata
+
+```
+
+Group by sample event and sampling point.
+
+```{r fig.cap="Fig 8a: Change in allele frequencies across three sampling points for each sampling event across all individuals.", fig.width=10, fig.height=50}
+
+# define populations using defined stratification
+setPop(gen_flagged) <- ~time
+
+# get allele freq
+frq <- get_allele_freqs(gen_flagged) %>%
+  separate(pop, into = c("GRP", "SAMPLE_POINT"), sep = "&") %>%
+  mutate(SAMPLE_POINT = case_when(SAMPLE_POINT == "T1" ~ 1,
+                                  SAMPLE_POINT == "T2" ~ 2,
+                                  SAMPLE_POINT == "T3" ~ 3))
+
+ggplot(frq, aes(x = SAMPLE_POINT, y = freq, color = allele)) +
+  geom_line() +
+  geom_point(shape = 21, fill = "white") +
+  facet_grid(locus ~ GRP) +
+  theme_facet +
+  labs(x = "allele frequency", y = "sample point") +
+  theme_facet +
+  theme(legend.position = "bottom")
+
+```
+
+Group by family, sample event and sampling point and calculate allele frequencies and compare change distributions across families per locus.
+
+```{r fig.cap="Fig 8b: Change in frequency of major allele at T1 across three sampling points for each sampling event within a family.", fig.width=10, fig.height=50}
+
+# define populations using defined stratification
+setPop(gen_flagged) <- ~family
+
+# get allele freq
+frq <- get_allele_freqs(gen_flagged) %>%
+  separate(pop, into = c("FAM", "GRP", "SAMPLE_POINT"), sep = "&") %>%
+  group_by(FAM, GRP, SAMPLE_POINT, locus) %>%
+  slice_max(n = 1, order_by = freq) %>%
+  mutate(SAMPLE_POINT = case_when(SAMPLE_POINT == "T1" ~ 1,
+                                  SAMPLE_POINT == "T2" ~ 2,
+                                  SAMPLE_POINT == "T3" ~ 3))
+
+ggplot(frq, aes(x = SAMPLE_POINT, y = freq, color = FAM)) +
+  geom_line() +
+  geom_point(shape = 21, fill = "white") + 
+  facet_grid(locus ~ GRP) +
+  theme_facet +
+  theme(legend.position = "none")
+
+```
+
+
+## Compare clustering of flagged loci
+
 Compare distribution of flagged loci on genome scaffolds.
 
-```{r fig.cap="Fig 7b: Distribution of Mahalanobis distance per locus across the genome.", fig.width=10, fig.height=4}
+```{r fig.cap="Fig 9a: Distribution of Mahalanobis distance per locus across the genome.", fig.width=10, fig.height=4}
 
 ggplot(locus_rda.env, aes(x = LOCUS, y = MAH_DIST, fill = RDA_OUTLIER)) +
   geom_point(shape = 21, size = 2) +
@@ -1288,7 +1385,7 @@ kable(
 
 Compare clustering of flagged loci on scaffolds with four flagged loci.
 
-```{r fig.cap="Fig 7c: Distribution of Mahalanobis distance per locus for scaffolds with 4 flagged outlier loci. Loci above red dashed line are flagged as significantly associated.", fig.width=10, fig.height=4}
+```{r fig.cap="Fig 9b: Distribution of Mahalanobis distance per locus for scaffolds with 4 flagged outlier loci. Loci above red dashed line are flagged as significantly associated.", fig.width=10, fig.height=4}
 
 tmp <- locus_rda.env %>%
   filter(SCAFFOLD %in% c("scf7180000009121")) %>%
@@ -1309,7 +1406,7 @@ ggplot(tmp, aes(x = POS, y = MAH_DIST, fill = RDA_OUTLIER)) +
 
 Compare clustering of flagged loci on scaffolds with three flagged loci.
 
-```{r fig.cap="Fig 7d: Distribution of Mahalanobis distance per locus for scaffolds with three flagged outlier loci. Loci above red dashed line are flagged as significantly associated.", fig.width=10, fig.height=40}
+```{r fig.cap="Fig 9c: Distribution of Mahalanobis distance per locus for scaffolds with three flagged outlier loci. Loci above red dashed line are flagged as significantly associated.", fig.width=10, fig.height=40}
 
 tmp <- locus_rda.env %>%
   filter(SCAFFOLD %in% c("scf7180000009161")) %>%
@@ -1494,7 +1591,7 @@ multiplot(p1, p2, p3, p4,
 
 Compare clustering of flagged loci on scaffolds with two flagged loci.
 
-```{r fig.cap="Fig 7e: Distribution of Mahalanobis distance per locus for scaffolds with two flagged outlier loci. Loci above red dashed line are flagged as significantly associated.", fig.width=10, fig.height=50}
+```{r fig.cap="Fig 9d: Distribution of Mahalanobis distance per locus for scaffolds with two flagged outlier loci. Loci above red dashed line are flagged as significantly associated.", fig.width=10, fig.height=50}
 
 tmp <- locus_rda.env %>%
   filter(SCAFFOLD %in% c("scf7180000009116")) %>%
@@ -1752,7 +1849,7 @@ multiplot(p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11,
 ```
 
 
-# Identity of genes potentially associated with environment (selection)
+## Identity of genes potentially associated with environment (selection)
 
 Compare significant outlier from the RDA to a preliminary draft of the red drum genome to identify genes potentially affected by selection. For each flagged locus, extract all genes with boundaries falling within 50kb using the annotated red drum scaffolds.
 
@@ -1877,6 +1974,3 @@ Top genes candidates (ranked; mahalanobis distance > 30)
 * 60S ribosomal protein L23a (rpl23a): ribosomal protein subunit
 * methyl-CpG-binding domain protein 6-like (mbd6): bind to heterochromatic regions [@Laget2010].
 
-
-# References
-<div id="refs"></div>

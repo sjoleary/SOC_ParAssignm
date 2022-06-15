@@ -20,6 +20,8 @@ library(tint)
 library(knitr)
 library(glue)
 library(ggrepel)
+library(FSA)
+library(ggpubr)
 source("scr/libraries.R")
 
 # load functions
@@ -38,6 +40,7 @@ options(scipen=999)
 knitr::opts_chunk$set(
 	message = FALSE,
 	warning = FALSE,
+	error = FALSE,
 	cache.extra = packageVersion("tint"),
 	tidy = FALSE,
 	echo = FALSE
@@ -52,13 +55,28 @@ pedigree <- read_delim("results/YOY.pedigree", delim = "\t")
 adults <- read_delim("data/ASSIGNMENT/Adult_info.txt", delim = "\t")
 
 
-col_events <- c("#4473c4", "#3d6623", "#c00000")
+col_events <- c("#5b9bd5",     # blue
+                "#70ad47",     # green
+                "#c00000")     # red
 
-col_tanks <- c("darkorange", "#72b844", "gold", "#7008A0")
+col_tanks <- c("darkorange",   # orange
+               "#72b844",      # light green
+               "gold",         # yellow
+               "#7008A0")      # purple
+
+col_reprod <- c("#72b844",      # light green
+                "darkorange",   # orange
+               "gold")      
   
-col_nine <- c("#44546a", "#7008a0", "#ed7d31", 
-              "#ffbf00", "#4473c4", "#70ad47", 
-              "#c00000",  "#375623", "#5b9bd5")  
+col_nine <- c("#44546a",       # bluegrey
+              "#7008a0",       # purple
+              "#ed7d31",       # orange
+              "#ffbf00",       # yellow
+              "#4473c4",       # blue
+              "#70ad47",       # light green
+              "#c00000",       # red
+              "#375623",       # forest green
+              "#5b9bd5")       # light blue
 
 ```
 
@@ -102,7 +120,10 @@ Calculate values of maximum attainable $N_{b}$ given the number of individuals i
 ```{r}
 
 # calculate the effective number of males
-Nbm <- setNames(data.frame(matrix(ncol = 3, nrow = 0)), c("SAMPLE_POINT", "Nbm", "SPAWNING_EVENT"))
+Nbm <- setNames(data.frame(matrix(ncol = 3, nrow = 0)), c("SAMPLE_POINT", "Nbm", "SPAWNING_EVENT")) %>%
+  mutate(SAMPLE_POINT = as.character(SAMPLE_POINT),
+         Nbm = as.numeric(Nbm),
+         SPAWNING_EVENT = as.character(SPAWNING_EVENT))
 
 for(i in c("YOY-1", "YOY-2","YOY-3")){
   
@@ -123,7 +144,10 @@ for(i in c("YOY-1", "YOY-2","YOY-3")){
 
 
 # calculate the effective number of females
-Nbf <- setNames(data.frame(matrix(ncol = 3, nrow = 0)), c("SAMPLE_POINT", "Nbf", "SPAWNING_EVENT"))
+Nbf <- setNames(data.frame(matrix(ncol = 3, nrow = 0)), c("SAMPLE_POINT", "Nbf", "SPAWNING_EVENT")) %>%
+  mutate(SAMPLE_POINT = as.character(SAMPLE_POINT),
+         Nbf = as.numeric(Nbf),
+         SPAWNING_EVENT = as.character(SPAWNING_EVENT))
 
 for(i in c("YOY-1", "YOY-2","YOY-3")){
   
@@ -965,8 +989,8 @@ comp <- pedigree %>%
   mutate(BREEDER = str_extract(BREEDER, "[[:digit:]]+"))
 
 ggplot(comp, aes(x = BREEDER, y = freq, fill = SAMPLE_POINT, shape = SPAWNERS, group = BREEDER)) +
-  geom_line(color = "black", size = 1.5) +
-  geom_point(size = 4) +
+  geom_line(color = "black", size = 1) +
+  geom_point(size = 3.5) +
   geom_hline(yintercept = 0, color = "darkred", linetype = "dashed") +
   coord_flip() +
   scale_fill_manual(values = col_events) +
@@ -1021,7 +1045,7 @@ adults <- read_delim("data/ASSIGNMENT/Adult_info.txt", delim = "\t") %>%
 
 ## Determine mean spawning/reproductive success per breeder
 
-Mean reproductive success at sample points T1 and T3 per breeder was determined as the mean proprotion of progeny assigned to an adult across spawning events (adults participated in one to three events). 
+Mean reproductive success at sample points T1 and T3 per breeder was determined as the mean proportion of progeny assigned to an adult across spawning events (adults participated in one to three events). 
 
 ```{r fig.cap="Figure 13: Spawning and reproductive success per breeder/spawning event.", fig.height=9, fig.width=10}
 
@@ -1102,7 +1126,7 @@ kable(adults %>%
 
 Breeders that participated in multiple events were categorized as 'always successful', 'not always successful', and 'never successful' and their mean age at introduction, condition, spawning age, and time spent in the hatchery compared.
 
-```{r}
+```{r fig.cap="Distribution of condition parameters across breeders classified as always, not always, and never successful.", fig.width=9, fig.height=7}
 
 df <- adults %>%
   mutate(WEIGHT = ifelse(WEIGHT == 0, NA, WEIGHT),
@@ -1187,16 +1211,13 @@ Similarly, for breeders that were not successful spawners at least once the mean
 
 In contrast, breeders that were always successful spawners spawn at a mean age of `r round(mean_age_always, digits = 1)`, spent a mean `r mean_time_in_hatch_always` years in the hatchery, and were introduced to the hatchery at `r round(mean_age_introd_always, digits = 1)` years old.
 
-Test for significant difference among mean at at spawning using an ANOVA and pairwise comparisons using Tukey's 'Honest Significant Difference' method (based on Studentized range statistic) which uses intervals based on the range of the sample means (not individual diferences) with an adjustment for differences of observations made for each category.
-
+Distribution is not normal and sample sizes differ among the three categories. Test for significant differences among the categories for each condition parameter using Kruskal-Wallis followed by ad post hoc Dunn test to identify pairwise differences. Kruskal Wallis is a non-parametric equivalent of an ANOVA^[ANOVA assumed normal distribution and compares the mean values among two or more groups.] and compares the mean ranks (medians) of groups which are less sensitive to outliers than means. It does not assume any specific distribution to calculate test statistics and p-values. Dunn's test retains the rank sums of the Kruskal-Wallis test to test for pairwise comparisons. Correct for multiple comparisons using Benjamini-Hochberg FDR method (5% cut-off).
 
 **Age at spawning**
 
-Test for heterogeneity using ANOVA and significant pairwise differences using Tukey HSD statistic.
-
 ```{r}
 
-## test for significant diferences AGE SPAWN ----
+## test for significant differences AGE SPAWN ----
 
 # plot comparisons
 age_spawn <- df %>%
@@ -1206,32 +1227,28 @@ age_spawn <- df %>%
 p1 <- ggplot(age_spawn, aes(x = CATEGORY, y = AGE_SPAWN, fill = CATEGORY)) +
   geom_boxplot(alpha = 0.5) +
   geom_jitter(shape = 21, size = 3, position = position_jitter(0.1)) +
-  scale_fill_manual(values = c("#4473c4", "#3d6623", "#7008A0")) +
+  scale_fill_manual(values = c("#375623", "gold", "#c00000")) +
   labs(x = "", y = "age at spawning") +
   theme_standard +
   theme(legend.position = "none",
         axis.text.x=element_blank())
 
-# anova
-anova <- aov(AGE_SPAWN~CATEGORY, data = age_spawn)
+# kruskal-wallis
+writeLines("\n RESULTS KRUSKAL WALLIS")
+kruskal.test(AGE_SPAWN~CATEGORY, data = age_spawn)
 
-writeLines("\n RESULTS ANOVA")
-summary(anova)
-
-# Tukey
-writeLines("\n \nRESULTS PAIRWISE COMPARISONS USING TUKEY HONEST SIGNIFICANT DIFFERENCES")
-TukeyHSD(anova)
+# Dunn's
+writeLines("\n \nRESULTS PAIRWISE COMPARISONS USING DUNN's TEST")
+dunnTest(AGE_SPAWN~CATEGORY, data = age_spawn, method = "bh")
 
 ```
 
 
 **Age at introduction to hatchery**
 
-Test for heterogeneity using ANOVA and significant pairwise differences using Tukey HSD statistic.
-
 ```{r}
 
-## test for significant diferences AGE INTRODUCED ----
+## test for significant differences AGE INTRODUCED ----
 
 # plot comparisons
 age_introd <- df %>%
@@ -1241,32 +1258,31 @@ age_introd <- df %>%
 p2 <- ggplot(age_introd, aes(x = CATEGORY, y = AGE_INTROD, fill = CATEGORY)) +
   geom_boxplot(alpha = 0.5) +
   geom_jitter(shape = 21, size = 3, position = position_jitter(0.1)) +
-  scale_fill_manual(values = c("#4473c4", "#3d6623", "#7008A0")) +
+  scale_fill_manual(values = c("#375623", "gold", "#c00000")) +
   labs(x = "", y = "age introduced") +
   theme_standard +
   theme(legend.position = "none",
         axis.text.x=element_blank())
 
-# anova
-anova <- aov(AGE_INTROD~CATEGORY, data = age_introd)
 
-writeLines("\nRESULTS ANOVA")
-summary(anova)
+# kruskal-wallis
+writeLines("\n RESULTS KRUSKAL WALLIS")
+kruskal.test(AGE_INTROD~CATEGORY, data = age_introd)
 
-# Tukey
-writeLines("\n \nRESULTS PAIRWISE COMPARISONS USING TUKEY HONEST SIGNIFICANT DIFFERENCES")
-TukeyHSD(anova)
+# Dunn's
+writeLines("\n \nRESULTS PAIRWISE COMPARISONS USING DUNN's TEST")
+dunnTest(AGE_INTROD~CATEGORY, data = age_introd, method = "bh")
+
+
 
 ```
 
 
 **Time spent in hatchery**
 
-Test for heterogeneity using ANOVA and significant pairwise differences using Tukey HSD statistic.
-
 ```{r}
 
-## test for significant diferences TIME HATCHERY ----
+## test for significant differences TIME HATCHERY ----
 
 # plot comparisons
 time_hatch <- df %>%
@@ -1276,32 +1292,30 @@ time_hatch <- df %>%
 p3 <- ggplot(time_hatch, aes(x = CATEGORY, y = TIME_HATCHERY, fill = CATEGORY)) +
   geom_boxplot(alpha = 0.5) +
   geom_jitter(shape = 21, size = 3, position = position_jitter(0.1)) +
-  scale_fill_manual(values = c("#4473c4", "#3d6623", "#7008A0")) +
+  scale_fill_manual(values = c("#375623", "gold", "#c00000")) +
   labs(x = "", y = "time hatchery") +
   theme_standard +
   theme(legend.position = "none",
         axis.text.x=element_blank())
 
-# anova
-anova <- aov(TIME_HATCHERY~CATEGORY, data = time_hatch)
 
-writeLines("\nRESULTS ANOVA")
-summary(anova)
+# kruskal-wallis
+writeLines("\n RESULTS KRUSKAL WALLIS")
+kruskal.test(TIME_HATCHERY~CATEGORY, data = time_hatch)
 
-# Tukey
-writeLines("\n \nRESULTS PAIRWISE COMPARISONS USING TUKEY HONEST SIGNIFICANT DIFFERENCES")
-TukeyHSD(anova)
+# Dunn's
+writeLines("\n \nRESULTS PAIRWISE COMPARISONS USING DUNN's TEST")
+dunnTest(TIME_HATCHERY~CATEGORY, data = time_hatch, method = "bh")
+
 
 ```
 
 
 **Condition at introduction**
 
-Test for heterogeneity using ANOVA and significant pairwise differences using Tukey HSD statistic.
-
 ```{r}
 
-## test for significant diferences CONDITION INTRODUCED ----
+## test for significant differences CONDITION INTRODUCED ----
 
 # plot comparisons
 cond_introd <- df %>%
@@ -1311,32 +1325,30 @@ cond_introd <- df %>%
 p4 <- ggplot(cond_introd, aes(x = CATEGORY, y = COND_INTROD, fill = CATEGORY)) +
   geom_boxplot(alpha = 0.5) +
   geom_jitter(shape = 21, size = 3, position = position_jitter(0.1)) +
-  scale_fill_manual(values = c("#4473c4", "#3d6623", "#7008A0")) +
+  scale_fill_manual(values = c("#375623", "gold", "#c00000")) +
   labs(x = "", y = "condition introduction") +
   theme_standard +
   theme(legend.position = "none",
         axis.text.x=element_blank())
 
-# anova
-anova <- aov(COND_INTROD~CATEGORY, data = cond_introd)
 
-writeLines("\nRESULTS ANOVA")
-summary(anova)
+# kruskal-wallis
+writeLines("\n RESULTS KRUSKAL WALLIS")
+kruskal.test(COND_INTROD~CATEGORY, data = cond_introd)
 
-# Tukey
-writeLines("\n \nRESULTS PAIRWISE COMPARISONS USING TUKEY HONEST SIGNIFICANT DIFFERENCES")
-TukeyHSD(anova)
+# Dunn's
+writeLines("\n \nRESULTS PAIRWISE COMPARISONS USING DUNN's TEST")
+dunnTest(COND_INTROD~CATEGORY, data = cond_introd, method = "bh")
 
 ```
 
 
 **Difference reproductive success T1-T3**
 
-Test for heterogeneity using ANOVA and significant pairwise differences using Tukey HSD statistic.
 
 ```{r}
 
-## test for significant diferences CONDITION INTRODUCED ----
+## test for significant differences Spawning vs Reproductive success ----
 
 # plot comparisons
 diff_succ <- df %>%
@@ -1346,27 +1358,25 @@ diff_succ <- df %>%
 p5 <- ggplot(diff_succ, aes(x = CATEGORY, y = DIFF_SUCCESS, fill = CATEGORY)) +
   geom_boxplot(alpha = 0.5) +
   geom_jitter(shape = 21, size = 3, position = position_jitter(0.1)) +
-  scale_fill_manual(values = c("#4473c4", "#3d6623", "#7008A0")) +
+  scale_fill_manual(values = c("#375623", "gold", "#c00000")) +
   labs(x = "", y = "difference success T1-T3") +
   theme_standard +
   theme(legend.position = "none",
         axis.text.x=element_blank())
-# anova
-anova <- aov(DIFF_SUCCESS~CATEGORY, data = diff_succ)
 
-writeLines("\nRESULTS ANOVA")
-summary(anova)
+# kruskal-wallis
+writeLines("\n RESULTS KRUSKAL WALLIS")
+kruskal.test(DIFF_SUCCESS~CATEGORY, data = diff_succ)
 
-# Tukey
-writeLines("\n \nRESULTS PAIRWISE COMPARISONS USING TUKEY HONEST SIGNIFICANT DIFFERENCES")
-TukeyHSD(anova)
+# Dunn's
+writeLines("\n \nRESULTS PAIRWISE COMPARISONS USING DUNN's TEST")
+dunnTest(DIFF_SUCCESS~CATEGORY, data = diff_succ, method = "bh")
 
 ```
 
-
 Compare median of distribution of observations
 
-```{r fig.cap="Figure 14: Distribution of mean age at spawning, mean at at introduction to the hatchery, and time spent in the hatchery before spawning event for breeders that participated in multiple spawning events", fig.height=4, fig.width=8}
+```{r fig.cap="Figure 14: Distribution of mean age at spawning, mean at at introduction to the hatchery, and time spent in the hatchery before spawning event for breeders that participated in multiple spawning events. Breeders are grouped as always successful (green), sometimes successful (yellow), and never successful (red).", fig.height=4, fig.width=8}
 
 multiplot(p1, p2, p3, p4, p5, cols = 5)
 
@@ -1375,9 +1385,9 @@ multiplot(p1, p2, p3, p4, p5, cols = 5)
 
 ## Comparison of reproductive success at T1 and T3 and conditioning parameters
 
-```{r fig.cap="Figure 15: Reproductive success at sampling points T1 and T3 related to conditioning parameters using each spawning event as an independet observation.", fig.height=15, fig.width=10}
+Spearman Rank correlation coefficient is a rank-based (non-parametric) measure of statistical dependence to assess who well relationship of X and Y can be described using a monotone function i.e. Y either strictly increases (or decreases) as X increases even if that relationship is not linear (Y does not increase by same increment for every increment of X).
 
-library(ggpmisc)
+```{r fig.cap="Figure 15: Reproductive success at sampling point T1 related to conditioning parameters using each spawning event as an independent observation.", fig.height=10}
 
 tmp <- adults %>%
   mutate(COND_INTROD = (WEIGHT*1000)/LENGTH,
@@ -1385,55 +1395,313 @@ tmp <- adults %>%
   select(SAMPLE_ID, SEX, TANK, SPAWNING_EVENT, SPAWN_SUCC, 
          REPROD_SUCC,
          COND_INTROD,
-         AGE_INTROD, TIME_HATCHERY, AGE_SPAWN) %>%
-  gather(key = VARIABLES, value = VALUE, 6:10) %>%
-  mutate(VARIABLES = ordered(VARIABLES,
-                             levels = c("AGE_INTROD", "AGE_SPAWN", "TIME_HATCHERY", "COND_INTROD", "REPROD_SUCC")))
+         AGE_INTROD, TIME_HATCHERY, AGE_SPAWN) 
 
-# set formula for regression
-my.formula <- y ~ x
 
-p1 <- ggplot(tmp, aes(x = VALUE, y = SPAWN_SUCC, group = SEX, fill = SPAWNING_EVENT)) +
-  geom_smooth(method = "lm", color = "black", se = FALSE, formula = my.formula) +
-  geom_point(size = 2, shape = 21) +
-  stat_poly_eq(formula = my.formula, 
-               aes(label = paste(..rr.label.., sep = "~~~")), 
-               parse = TRUE) +
-  #stat_fit_glance(method = 'lm', method.args = list(formula = my.formula), 
-  #                geom = 'text',
-  #                aes(label = paste("P = ", signif(..p.value.., digits = 4), sep = ""))) +
-  facet_grid(SEX ~ VARIABLES, scales = "free") +
-  scale_fill_manual(values = col_events) +
-  labs(y = "reproductive success (T1)", x = "") +
-  theme_facet
+# Age introduced ----
+  
+  # spearman correlation
+  df <- tmp %>%
+    filter(SEX == "F")
 
-tmp <- adults %>%
-  mutate(WEIGHT = ifelse(WEIGHT == 0, NA, WEIGHT),
-         COND_INTROD = (WEIGHT*1000)/LENGTH,
-         DIFF_SUCCESS = MEAN_SPAWN-MEAN_REPROD) %>%
-  select(SAMPLE_ID, SEX, TANK, SPAWNING_EVENT, REPROD_SUCC, 
-         SPAWN_SUCC, 
-         COND_INTROD,
-         AGE_INTROD, TIME_HATCHERY, AGE_SPAWN) %>%
-  gather(key = VARIABLES, value = VALUE, 6:10) %>%
-  mutate(VARIABLES = ordered(VARIABLES,
-                             levels = c("AGE_INTROD", "AGE_SPAWN", "TIME_HATCHERY",
-                                        "COND_INTROD", "SPAWN_SUCC")))
+  m <- cor.test(df$AGE_INTROD, df$SPAWN_SUCC, method = "spearman")
+  
+  
+  df <- tmp %>%
+    filter(SEX == "M")
 
-# set formula for regression
-my.formula <- y ~ x
+  f <- cor.test(df$AGE_INTROD, df$SPAWN_SUCC, method = "spearman")
+  
+  # plot 
+  p1 <- ggplot(tmp, aes(x = AGE_INTROD, y = SPAWN_SUCC, color = SEX, fill = SEX)) +
+    geom_point(shape = 21, size = 2, color = "black") +
+    geom_smooth(method = "lm", se = FALSE) +
+    scale_fill_manual(values = c("gold", "purple")) +
+    scale_color_manual(values = c("gold", "purple")) +
+    annotate("text", x = 25, y = .75, color = "black",
+             label = paste("M: rho = ", round(m$estimate, digits = 2), 
+                           ", p =", round(m$p.value, digits = 3))) +
+    annotate("text", x = 25, y = .67, color = "black",
+             label = paste("F: rho = ", round(f$estimate, digits = 2), 
+                           ", p =", round(f$p.value, digits = 3))) +
+    labs(x = "age introduced", y = "success at T1") +
+    theme_standard
+  
+  
+# Age at spawn ----
+  
+  # spearman correlation
+  df <- tmp %>%
+    filter(SEX == "F")
 
-p2 <- ggplot(tmp, aes(x = VALUE, y = REPROD_SUCC, group = SEX, fill = SPAWNING_EVENT)) +
-  geom_smooth(method = "lm", color = "black", se = FALSE, formula = my.formula) +
-  geom_point(size = 2, shape = 21) +
-  stat_poly_eq(formula = my.formula, 
-               aes(label = paste(..rr.label.., sep = "~~~")), 
-               parse = TRUE) +
-  facet_grid(SEX ~ VARIABLES, scales = "free") +
-  scale_fill_manual(values = col_events) +
-  labs(y = "reproductive success (T3)", x = "") +
-  theme_facet
+  m <- cor.test(df$AGE_SPAWN, df$SPAWN_SUCC, method = "spearman")
+  
+  
+  df <- tmp %>%
+    filter(SEX == "M")
 
-multiplot(p1, p2, cols = 1)
+  f <- cor.test(df$AGE_SPAWN, df$SPAWN_SUCC, method = "spearman")
+  
+  # plot 
+  p2 <- ggplot(tmp, aes(x = AGE_SPAWN, y = SPAWN_SUCC, color = SEX, fill = SEX)) +
+    geom_point(shape = 21, size = 2, color = "black") +
+    geom_smooth(method = "lm", se = FALSE) +
+    scale_fill_manual(values = c("gold", "purple")) +
+    scale_color_manual(values = c("gold", "purple")) +
+    annotate("text", x = 27, y = .75, color = "black",
+             label = paste("M: rho = ", round(m$estimate, digits = 2), 
+                           ", p =", round(m$p.value, digits = 3))) +
+    annotate("text", x = 27, y = .67, color = "black",
+             label = paste("F: rho = ", round(f$estimate, digits = 2), 
+                           ", p =", round(f$p.value, digits = 3))) +
+    labs(x = "age at spawn", y = "success at T1") +
+    theme_standard
+  
+  
+# Time in the hatchery ----
+  
+  # spearman correlation
+  df <- tmp %>%
+    filter(SEX == "F")
+
+  m <- cor.test(df$TIME_HATCHERY, df$SPAWN_SUCC, method = "spearman")
+  
+  
+  df <- tmp %>%
+    filter(SEX == "M")
+
+  f <- cor.test(df$TIME_HATCHERY, df$SPAWN_SUCC, method = "spearman")
+  
+  # plot 
+  p3 <- ggplot(tmp, aes(x = TIME_HATCHERY, y = SPAWN_SUCC, color = SEX, fill = SEX)) +
+    geom_point(shape = 21, size = 2, color = "black") +
+    geom_smooth(method = "lm", se = FALSE) +
+    scale_fill_manual(values = c("gold", "purple")) +
+    scale_color_manual(values = c("gold", "purple")) +
+    annotate("text", x = 5, y = .75, color = "black",
+             label = paste("M: rho = ", round(m$estimate, digits = 2), 
+                           ", p =", round(m$p.value, digits = 3))) +
+    annotate("text", x = 5, y = .67, color = "black",
+             label = paste("F: rho = ", round(f$estimate, digits = 2), 
+                           ", p =", round(f$p.value, digits = 3))) +
+    labs(x = "time in hatchery", y = "success at T1") +
+    theme_standard
+  
+# Condition when introduced ----
+  
+  # spearman correlation
+  df <- tmp %>%
+    filter(SEX == "F")
+
+  m <- cor.test(df$COND_INTROD, df$SPAWN_SUCC, method = "spearman")
+  
+  
+  df <- tmp %>%
+    filter(SEX == "M")
+
+  f <- cor.test(df$COND_INTROD, df$SPAWN_SUCC, method = "spearman")
+  
+  # plot 
+  p4 <- ggplot(tmp, aes(x = COND_INTROD, y = SPAWN_SUCC, color = SEX, fill = SEX)) +
+    geom_point(shape = 21, size = 2, color = "black") +
+    geom_smooth(method = "lm", se = FALSE) +
+    scale_fill_manual(values = c("gold", "purple")) +
+    scale_color_manual(values = c("gold", "purple")) +
+    annotate("text", x = 11, y = .75, color = "black",
+             label = paste("M: rho = ", round(m$estimate, digits = 2), 
+                           ", p =", round(m$p.value, digits = 3))) +
+    annotate("text", x = 11, y = .67, color = "black",
+             label = paste("F: rho = ", round(f$estimate, digits = 2), 
+                           ", p =", round(f$p.value, digits = 3))) +
+    labs(x = "condition introduced", y = " ") +
+    theme_standard  
+  
+  
+# reprod success ----
+  
+  # spearman correlation
+  df <- tmp %>%
+    filter(SEX == "F")
+
+  m <- cor.test(df$REPROD_SUCC, df$SPAWN_SUCC, method = "spearman")
+  
+  df <- tmp %>%
+    filter(SEX == "M")
+
+  f <- cor.test(df$REPROD_SUCC, df$SPAWN_SUCC, method = "spearman")
+  
+  # plot 
+  p5 <- ggplot(tmp, aes(x = REPROD_SUCC, y = SPAWN_SUCC, color = SEX, fill = SEX)) +
+    geom_point(shape = 21, size = 2, color = "black") +
+    geom_smooth(method = "lm", se = FALSE) +
+    scale_fill_manual(values = c("gold", "purple")) +
+    scale_color_manual(values = c("gold", "purple")) +
+    annotate("text", x = .34, y = .75, color = "black",
+             label = paste("M: rho = ", round(m$estimate, digits = 2), 
+                           ", p =", round(m$p.value, digits = 3))) +
+    annotate("text", x = .34, y = .67, color = "black",
+             label = paste("F: rho = ", round(f$estimate, digits = 2), 
+                           ", p =", round(f$p.value, digits = 3))) +
+    labs(x = "success at T3", y = " ") +
+    theme_standard
+
+multiplot(p1, p2, p3, p4, p5, cols = 2)  
+  
+```
+
+
+
+```{r fig.cap="Figure 16: Reproductive success at sampling point T3 related to conditioning parameters using each spawning event as an independent observation.", fig.height=10}
+
+# Age introduced ----
+  
+  # spearman correlation
+  df <- tmp %>%
+    filter(SEX == "F")
+
+  m <- cor.test(df$AGE_INTROD, df$REPROD_SUCC, method = "spearman")
+  
+  
+  df <- tmp %>%
+    filter(SEX == "M")
+
+  f <- cor.test(df$AGE_INTROD, df$REPROD_SUCC, method = "spearman")
+  
+  # plot 
+  p1 <- ggplot(tmp, aes(x = AGE_INTROD, y = REPROD_SUCC, color = SEX, fill = SEX)) +
+    geom_point(shape = 21, size = 2, color = "black") +
+    geom_smooth(method = "lm", se = FALSE) +
+    scale_fill_manual(values = c("gold", "purple")) +
+    scale_color_manual(values = c("gold", "purple")) +
+    annotate("text", x = 23, y = .75, color = "black",
+             label = paste("M: rho = ", round(m$estimate, digits = 2), 
+                           ", p =", round(m$p.value, digits = 3))) +
+    annotate("text", x = 23, y = .67, color = "black",
+             label = paste("F: rho = ", round(f$estimate, digits = 2), 
+                           ", p =", round(f$p.value, digits = 3))) +
+    labs(x = "age introduced", y = "success at T3") +
+    theme_standard
+  
+  
+# Age at spawn ----
+  
+  # spearman correlation
+  df <- tmp %>%
+    filter(SEX == "F")
+
+  m <- cor.test(df$AGE_SPAWN, df$REPROD_SUCC, method = "spearman")
+  
+  
+  df <- tmp %>%
+    filter(SEX == "M")
+
+  f <- cor.test(df$AGE_SPAWN, df$REPROD_SUCC, method = "spearman")
+  
+  # plot 
+  p2 <- ggplot(tmp, aes(x = AGE_SPAWN, y = REPROD_SUCC, color = SEX, fill = SEX)) +
+    geom_point(shape = 21, size = 2, color = "black") +
+    geom_smooth(method = "lm", se = FALSE) +
+    scale_fill_manual(values = c("gold", "purple")) +
+    scale_color_manual(values = c("gold", "purple")) +
+    annotate("text", x = 26, y = .75, color = "black",
+             label = paste("M: rho = ", round(m$estimate, digits = 2), 
+                           ", p =", round(m$p.value, digits = 3))) +
+    annotate("text", x = 26, y = .67, color = "black",
+             label = paste("F: rho = ", round(f$estimate, digits = 2), 
+                           ", p =", round(f$p.value, digits = 3))) +
+    labs(x = "age at spawn", y = "success at T3") +
+    theme_standard
+  
+  
+# Time in the hatchery ----
+  
+  # spearman correlation
+  df <- tmp %>%
+    filter(SEX == "F")
+
+  m <- cor.test(df$TIME_HATCHERY, df$REPROD_SUCC, method = "spearman")
+  
+  
+  df <- tmp %>%
+    filter(SEX == "M")
+
+  f <- cor.test(df$TIME_HATCHERY, df$REPROD_SUCC, method = "spearman")
+  
+  # plot 
+  p3 <- ggplot(tmp, aes(x = TIME_HATCHERY, y = REPROD_SUCC, color = SEX, fill = SEX)) +
+    geom_point(shape = 21, size = 2, color = "black") +
+    geom_smooth(method = "lm", se = FALSE) +
+    scale_fill_manual(values = c("gold", "purple")) +
+    scale_color_manual(values = c("gold", "purple")) +
+    annotate("text", x = 4, y = .75, color = "black",
+             label = paste("M: rho = ", round(m$estimate, digits = 2), 
+                           ", p =", round(m$p.value, digits = 3))) +
+    annotate("text", x = 4, y = .67, color = "black",
+             label = paste("F: rho = ", round(f$estimate, digits = 2), 
+                           ", p =", round(f$p.value, digits = 3))) +
+    labs(x = "time in hatchery", y = "success at T3") +
+    theme_standard
+  
+# Condition when introduced ----
+  
+  # spearman correlation
+  df <- tmp %>%
+    filter(SEX == "F")
+
+  m <- cor.test(df$COND_INTROD, df$REPROD_SUCC, method = "spearman")
+  
+  
+  df <- tmp %>%
+    filter(SEX == "M")
+
+  f <- cor.test(df$COND_INTROD, df$REPROD_SUCC, method = "spearman")
+  
+  # plot 
+  p4 <- ggplot(tmp, aes(x = COND_INTROD, y = REPROD_SUCC, color = SEX, fill = SEX)) +
+    geom_point(shape = 21, size = 2, color = "black") +
+    geom_smooth(method = "lm", se = FALSE) +
+    scale_fill_manual(values = c("gold", "purple")) +
+    scale_color_manual(values = c("gold", "purple")) +
+    annotate("text", x = 9, y = .75, color = "black",
+             label = paste("M: rho = ", round(m$estimate, digits = 2), 
+                           ", p =", round(m$p.value, digits = 3))) +
+    annotate("text", x = 9, y = .67, color = "black",
+             label = paste("F: rho = ", round(f$estimate, digits = 2), 
+                           ", p =", round(f$p.value, digits = 3))) +
+    labs(x = "condition introduced", y = " ") +
+    theme_standard  
+  
+  
+# reprod success ----
+  
+  # spearman correlation
+  df <- tmp %>%
+    filter(SEX == "F")
+
+  m <- cor.test(df$REPROD_SUCC, df$REPROD_SUCC, method = "spearman")
+  
+  df <- tmp %>%
+    filter(SEX == "M")
+
+  f <- cor.test(df$REPROD_SUCC, df$REPROD_SUCC, method = "spearman")
+  
+  # plot 
+  p5 <- ggplot(tmp, aes(x = SPAWN_SUCC, y = REPROD_SUCC, color = SEX, fill = SEX)) +
+    geom_point(shape = 21, size = 2, color = "black") +
+    geom_smooth(method = "lm", se = FALSE) +
+    scale_fill_manual(values = c("gold", "purple")) +
+    scale_color_manual(values = c("gold", "purple")) +
+    annotate("text", x = .34, y = .75, color = "black",
+             label = paste("M: rho = ", round(m$estimate, digits = 2), 
+                           ", p =", round(m$p.value, digits = 3))) +
+    annotate("text", x = .34, y = .67, color = "black",
+             label = paste("F: rho = ", round(f$estimate, digits = 2), 
+                           ", p =", round(f$p.value, digits = 3))) +
+    labs(x = "success at T1", y = " ") +
+    theme_standard
+
+multiplot(p1, p2, p3, p4, p5, cols = 2)  
+
 
 ```
+
